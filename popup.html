@@ -1,0 +1,156 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>DubWave</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    body {
+      width: 360px;
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: linear-gradient(135deg, #121212, #1b1030);
+      color: white;
+      padding: 18px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .logo {
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #7c3aed, #22d3ee);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 900;
+      font-size: 18px;
+      color: white;
+      box-shadow: 0 10px 25px rgba(124, 58, 237, 0.35);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: 0.3px;
+    }
+
+    p {
+      margin: 3px 0 0;
+      color: rgba(255,255,255,0.68);
+      font-size: 12px;
+    }
+
+    .card {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 16px;
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+
+    #status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 24px;
+      font-size: 14px;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #777;
+      flex: 0 0 auto;
+    }
+
+    .dot.on {
+      background: #22c55e;
+      box-shadow: 0 0 12px rgba(34,197,94,0.9);
+      animation: pulse 1.2s infinite;
+    }
+
+    .dot.err {
+      background: #ef4444;
+      box-shadow: 0 0 12px rgba(239,68,68,0.9);
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(0.82); opacity: 0.72; }
+    }
+
+    #lag {
+      margin-left: auto;
+      color: rgba(255,255,255,0.65);
+      font-size: 12px;
+    }
+
+    button {
+      width: 100%;
+      border: 0;
+      border-radius: 14px;
+      padding: 14px;
+      font-size: 15px;
+      font-weight: 800;
+      cursor: pointer;
+      transition: transform 0.08s ease, opacity 0.2s ease;
+    }
+
+    button:active {
+      transform: scale(0.985);
+    }
+
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    #toggle {
+      background: linear-gradient(135deg, #7c3aed, #22d3ee);
+      color: white;
+      margin-bottom: 10px;
+      box-shadow: 0 12px 30px rgba(34,211,238,0.18);
+    }
+
+    #settings {
+      background: rgba(255,255,255,0.08);
+      color: white;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+  </style>
+</head>
+<body>
+  <div class="brand">
+    <div class="logo">DW</div>
+    <div>
+      <h1>DubWave</h1>
+      <p>Real-time AI voice dubbing</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div id="status">
+      <span id="dot" class="dot"></span>
+      <span id="statusText">Loading...</span>
+      <span id="lag"></span>
+    </div>
+  </div>
+
+  <button id="toggle">Start dubbing</button>
+  <button id="settings">Settings</button>
+
+  <script src="popup.js"></script>
+</body>
+</html>

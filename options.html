@@ -1,0 +1,212 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>DubWave Settings</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(124,58,237,0.25), transparent 35%),
+        radial-gradient(circle at bottom right, rgba(34,211,238,0.22), transparent 30%),
+        #101010;
+      color: white;
+      display: flex;
+      justify-content: center;
+      padding: 40px 20px;
+    }
+
+    .panel {
+      width: 560px;
+      max-width: 100%;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 24px;
+      padding: 28px;
+      box-shadow: 0 25px 80px rgba(0,0,0,0.45);
+      backdrop-filter: blur(10px);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 24px;
+    }
+
+    .logo {
+      width: 52px;
+      height: 52px;
+      border-radius: 16px;
+      background: linear-gradient(135deg, #7c3aed, #22d3ee);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 900;
+      font-size: 20px;
+      box-shadow: 0 14px 35px rgba(124,58,237,0.35);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 28px;
+    }
+
+    p.sub {
+      margin: 5px 0 0;
+      color: rgba(255,255,255,0.65);
+      font-size: 14px;
+    }
+
+    label {
+      display: block;
+      margin: 20px 0 8px;
+      font-weight: 700;
+      color: rgba(255,255,255,0.92);
+    }
+
+    input, select {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(0,0,0,0.25);
+      color: white;
+      outline: none;
+      font-size: 15px;
+    }
+
+    input:focus, select:focus {
+      border-color: rgba(34,211,238,0.75);
+      box-shadow: 0 0 0 3px rgba(34,211,238,0.12);
+    }
+
+    select[size] {
+      padding: 8px;
+    }
+
+    option {
+      padding: 9px 10px;
+      border-radius: 10px;
+      margin-bottom: 4px;
+      background: rgba(255,255,255,0.03);
+    }
+
+    option:checked {
+      background: linear-gradient(135deg, rgba(124,58,237,0.45), rgba(34,211,238,0.35));
+      color: white;
+    }
+
+    button {
+      margin-top: 24px;
+      width: 100%;
+      border: 0;
+      border-radius: 16px;
+      padding: 15px;
+      font-size: 16px;
+      font-weight: 900;
+      cursor: pointer;
+      background: linear-gradient(135deg, #7c3aed, #22d3ee);
+      color: white;
+      box-shadow: 0 16px 40px rgba(34,211,238,0.18);
+    }
+
+    #status {
+      margin-top: 16px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      display: none;
+      font-weight: 700;
+    }
+
+    #status.success {
+      display: block;
+      background: rgba(34,197,94,0.14);
+      border: 1px solid rgba(34,197,94,0.25);
+    }
+
+    #status.error {
+      display: block;
+      background: rgba(239,68,68,0.14);
+      border: 1px solid rgba(239,68,68,0.25);
+    }
+
+    .note {
+      margin-top: 18px;
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: rgba(255,255,255,0.78);
+      font-size: 13px;
+      line-height: 1.65;
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <div class="brand">
+      <div class="logo">DW</div>
+      <div>
+        <h1>DubWave</h1>
+        <p class="sub">Settings for real-time AI voice dubbing</p>
+      </div>
+    </div>
+
+    <label for="apiKey">Gemini API Key</label>
+    <input type="password" id="apiKey" placeholder="Paste your Gemini API key">
+
+    <label for="targetLang">Target Language</label>
+    <select id="targetLang" size="10">
+      <option value="fa">Persian</option>
+      <option value="en">English</option>
+      <option value="es">Spanish</option>
+      <option value="fr">French</option>
+      <option value="de">German</option>
+      <option value="it">Italian</option>
+      <option value="pt">Portuguese</option>
+      <option value="ru">Russian</option>
+      <option value="zh">Chinese</option>
+      <option value="ja">Japanese</option>
+      <option value="ko">Korean</option>
+      <option value="ar">Arabic</option>
+      <option value="hi">Hindi</option>
+      <option value="tr">Turkish</option>
+      <option value="nl">Dutch</option>
+      <option value="pl">Polish</option>
+      <option value="sv">Swedish</option>
+      <option value="da">Danish</option>
+      <option value="no">Norwegian</option>
+      <option value="fi">Finnish</option>
+    </select>
+
+    <label for="voiceMode">Voice Mode</label>
+    <select id="voiceMode">
+      <option value="gemini">Gemini natural voice</option>
+      <option value="chrome">Chrome built-in TTS</option>
+    </select>
+
+    <label for="model">Gemini Live Model</label>
+    <input type="text" id="model" value="gemini-3.5-live-translate-preview">
+
+    <div class="note">
+      VPN note: If you are in a region where Google AI services are restricted,
+      make sure your VPN/proxy is active and tunnels WebSocket traffic.
+      WireGuard or OpenVPN usually works better for real-time audio.
+    </div>
+
+    <button id="save">Save Settings</button>
+    <div id="status"></div>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>
