@@ -1,18 +1,20 @@
 // DubWave realtime audio output worklet.
-// Maintains a small PCM ring buffer so streamed model audio is rendered by the
-// audio thread instead of creating one AudioBufferSourceNode per network chunk.
+// PCM ring buffer with a short startup target to absorb network jitter.
 
 class RealtimePcmPlayer extends AudioWorkletProcessor {
   constructor() {
     super();
     this.rate = 24000;
     this.capacity = this.rate * 3;
+    this.targetSamples = Math.floor(this.rate * 0.14);
     this.buffer = new Float32Array(this.capacity);
     this.read = 0;
     this.write = 0;
     this.available = 0;
     this.played = 0;
     this.underruns = 0;
+    this.started = false;
+    this.lastReport = 0;
 
     this.port.onmessage = (event) => {
       const msg = event.data || {};
@@ -20,6 +22,12 @@ class RealtimePcmPlayer extends AudioWorkletProcessor {
         this.read = 0;
         this.write = 0;
         this.available = 0;
+        this.started = false;
+        return;
+      }
+      if (msg.type === "setTargetMs") {
+        const ms = Math.max(40, Math.min(500, Number(msg.value) || 140));
+        this.targetSamples = Math.floor(this.rate * ms / 1000);
         return;
       }
       if (msg.type === "pcm" && msg.buffer) {
@@ -41,17 +49,31 @@ class RealtimePcmPlayer extends AudioWorkletProcessor {
     const out = outputs[0];
     if (!out || !out[0]) return true;
 
+    if (!this.started && this.available >= this.targetSamples) this.started = true;
+
     for (let i = 0; i < out[0].length; i++) {
-      if (this.available > 0) {
-        const sample = this.buffer[this.read];
+      if (this.started && this.available > 0) {
+        out[0][i] = this.buffer[this.read];
         this.read = (this.read + 1) % this.capacity;
         this.available--;
-        out[0][i] = sample;
         this.played++;
       } else {
         out[0][i] = 0;
-        if (i === 0) this.underruns++;
+        if (this.started && i === 0) this.underruns++;
       }
+    }
+
+    // Send low-rate telemetry from the audio thread. This is deliberately
+    // throttled so diagnostics never compete with audio rendering.
+    const now = currentTime;
+    if (now - this.lastReport >= 1) {
+      this.lastReport = now;
+      this.port.postMessage({
+        type: "metrics",
+        bufferedMs: this.available / this.rate * 1000,
+        underruns: this.underruns,
+        started: this.started
+      });
     }
 
     return true;
