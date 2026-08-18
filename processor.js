@@ -1,50 +1,60 @@
-
-// DubWave AudioWorklet processor.
-// Converts tab audio into 16 kHz mono PCM16 chunks optimized for low latency.
+// DubWave input AudioWorklet.
+// Converts browser tab audio to mono PCM16 at 16 kHz using a continuous
+// linear-interpolation resampler. Phase is preserved across process() calls.
 
 class PcmCaptureProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
+    this.targetRate = 16000;
+    this.sourceRate = sampleRate;
+    this.step = this.sourceRate / this.targetRate;
+    this.output = new Int16Array(320); // 20 ms @ 16 kHz
+    this.outputFrames = 0;
+    this.sourcePosition = 0;
+    this.previousSample = 0;
+    this.hasPreviousSample = false;
+  }
 
-    // 480 samples at 16 kHz = 30 ms.
-    this.sink = new Int16Array(480);
-    this.sinkFrames = 0;
-
-    this.sourceSampleRate = sampleRate;
-    this.targetSampleRate = 16000;
-    this.ratio = this.sourceSampleRate / this.targetSampleRate;
-    this.sourceIndex = 0;
+  emit(sample) {
+    const clamped = Math.max(-1, Math.min(1, sample));
+    this.output[this.outputFrames++] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+    if (this.outputFrames === this.output.length) {
+      this.port.postMessage(this.output.buffer, [this.output.buffer]);
+      this.output = new Int16Array(320);
+      this.outputFrames = 0;
+    }
   }
 
   process(inputs) {
     const input = inputs[0];
+    if (!input || !input[0]) return true;
+    const frames = input[0].length;
+    if (!frames) return true;
 
-    if (!input || input.length === 0 || !input[0]) {
-      return true;
+    const mono = new Float32Array(frames);
+    for (let i = 0; i < frames; i++) {
+      let sum = 0;
+      for (let c = 0; c < input.length; c++) sum += input[c][i] || 0;
+      mono[i] = sum / input.length;
     }
 
-    const channelData = input[0];
-
-    for (let i = 0; i < channelData.length; i++) {
-      const sourceFrame = this.sourceIndex++;
-      const targetFrame = Math.floor(sourceFrame / this.ratio);
-      const previousTargetFrame = Math.floor((sourceFrame - 1) / this.ratio);
-
-      if (targetFrame !== previousTargetFrame) {
-        let sample = Math.max(-1, Math.min(1, channelData[i]));
-
-        this.sink[this.sinkFrames++] =
-          sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-
-        if (this.sinkFrames >= this.sink.length) {
-          this.port.postMessage(this.sink.buffer, [this.sink.buffer]);
-
-          this.sink = new Int16Array(480);
-          this.sinkFrames = 0;
-        }
-      }
+    if (!this.hasPreviousSample) {
+      this.previousSample = mono[0];
+      this.hasPreviousSample = true;
     }
 
+    let position = this.sourcePosition;
+    while (position < frames - 1) {
+      const i = Math.floor(position);
+      const frac = position - i;
+      const a = i === 0 ? this.previousSample : mono[i];
+      const b = i === 0 ? mono[0] : mono[Math.min(i + 1, frames - 1)];
+      this.emit(a + (b - a) * frac);
+      position += this.step;
+    }
+
+    this.sourcePosition = position - (frames - 1);
+    this.previousSample = mono[frames - 1];
     return true;
   }
 }
