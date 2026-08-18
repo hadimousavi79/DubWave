@@ -1,5 +1,5 @@
 // DubWave v2 realtime offscreen engine.
-// Streaming capture -> Gemini Live -> PCM ring-buffer playback.
+// Streaming capture -> Gemini Live -> adaptive PCM buffering.
 
 const WS_BASE = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=";
 const INPUT_RATE = 16000;
@@ -10,6 +10,8 @@ const MIN_AUDIO_BYTES = 320;
 const INPUT_PEAK_LIMIT = 260;
 const OUTPUT_PEAK_LIMIT = 160;
 const MAX_RECONNECTS = 5;
+const TARGET_BUFFER_MS = 140;
+const MAX_BUFFER_MS = 3000;
 
 let ctx = null, ws = null, workletNode = null, playerNode = null;
 let mediaStream = null, sourceNode = null;
@@ -17,6 +19,10 @@ let stopped = false, setupDone = false, everConnected = false;
 let mode = "gemini", model = DEFAULT_MODEL, apiKey = "", targetLang = "fa";
 let startedAt = 0, lagSent = false, turnText = "", reconnectAttempts = 0;
 let ducked = false, hideTimer = null;
+let outputBufferedBytes = 0;
+let lastAudioAt = 0;
+let subtitleBuffer = "";
+let metricsTimer = null;
 
 const report = (msg) => chrome.runtime.sendMessage({ type: "engine_status", ...msg }).catch(() => {});
 const sendToTab = (type, payload = {}) => chrome.runtime.sendMessage({ type: "OFFSCREEN_TO_TAB", payload: { type, ...payload } }).catch(() => {});
@@ -66,6 +72,7 @@ async function main(init) {
     playerNode = new AudioWorkletNode(ctx, "realtime-pcm-player", { outputChannelCount: [1] });
     playerNode.connect(ctx.destination);
     await startCapture(init.streamId);
+    startMetrics();
     openSocket();
   } catch (error) {
     fail("Setup error: " + error.message);
@@ -105,6 +112,7 @@ function openSocket() {
   ws.onopen = () => {
     everConnected = true;
     reconnectAttempts = 0;
+    setupDone = false;
     ws.send(JSON.stringify(setupMessage()));
     report({ text: "Connected. Translating..." });
   };
@@ -143,7 +151,9 @@ function handleServerContent(raw) {
   if (!content) return;
   if (content.interrupted) {
     playerNode?.port.postMessage({ type: "reset" });
+    outputBufferedBytes = 0;
     turnText = "";
+    subtitleBuffer = "";
     sendToTab("HIDE_SUBTITLE");
     duckOff();
   }
@@ -151,7 +161,8 @@ function handleServerContent(raw) {
   for (const part of content.modelTurn?.parts || []) {
     if (part.text) {
       turnText += part.text;
-      sendToTab("SHOW_SUBTITLE", { text: formatSubtitle(turnText) });
+      subtitleBuffer += part.text;
+      emitSubtitle(false);
     }
     if (part.inlineData?.data) playPCM16(base64ToArrayBuffer(part.inlineData.data));
   }
@@ -162,16 +173,32 @@ function handleServerContent(raw) {
   }
 
   if (content.turnComplete) {
+    emitSubtitle(true);
     if (mode === "chrome" && turnText.trim()) speak(turnText.trim());
     scheduleHide();
     turnText = "";
+    subtitleBuffer = "";
     lagSent = false;
     startedAt = 0;
   }
 }
 
+function emitSubtitle(final) {
+  let text = subtitleBuffer.replace(/\s+/g, " ").trim();
+  if (!text) return;
+
+  // Keep live subtitles compact. Prefer the latest sentence/phrase while the
+  // model is streaming, then emit the complete turn at turnComplete.
+  if (!final && text.length > 180) {
+    const boundary = Math.max(text.lastIndexOf(". "), text.lastIndexOf("! "), text.lastIndexOf("? "), text.lastIndexOf("، "), text.lastIndexOf(".\n"));
+    if (boundary > 40) text = text.slice(boundary + 1).trim();
+    else text = text.slice(-180).trim();
+  }
+  sendToTab("SHOW_SUBTITLE", { text: formatSubtitle(text) });
+}
+
 function formatSubtitle(text) {
-  return text.replace(/\s+/g, " ").trim();
+  return String(text || "").replace(/\s+/g, " ").trim();
 }
 
 function playPCM16(arrayBuffer) {
@@ -183,6 +210,8 @@ function playPCM16(arrayBuffer) {
   duckOn();
   const copy = new Int16Array(pcm.length);
   copy.set(pcm);
+  outputBufferedBytes = Math.min(outputBufferedBytes + copy.byteLength, OUTPUT_RATE * 2 * MAX_BUFFER_MS / 1000);
+  lastAudioAt = performance.now();
   playerNode.port.postMessage({ type: "pcm", buffer: copy.buffer }, [copy.buffer]);
 }
 
@@ -201,9 +230,20 @@ function speak(text) {
   if (voice) utterance.voice = voice;
   speechSynthesis.speak(utterance);
 }
+function startMetrics() {
+  if (metricsTimer) clearInterval(metricsTimer);
+  metricsTimer = setInterval(() => {
+    if (stopped) return;
+    const bufferedMs = outputBufferedBytes / (OUTPUT_RATE * 2) * 1000;
+    report({ metrics: { bufferedMs: Number(bufferedMs.toFixed(1)), targetBufferMs: TARGET_BUFFER_MS, reconnects: reconnectAttempts, audioAgeMs: lastAudioAt ? Math.max(0, performance.now() - lastAudioAt) : null } });
+    // This is telemetry for the UI and future adaptive control. The actual
+    // PCM ring buffer remains the realtime source of truth.
+  }, 1000);
+}
 function fail(message) { report({ error: message }); cleanup(); }
 function cleanup() {
   stopped = true;
+  if (metricsTimer) clearInterval(metricsTimer);
   if (hideTimer) clearTimeout(hideTimer);
   try { playerNode?.port.postMessage({ type: "reset" }); } catch (_) {}
   try { duckOff(); sendToTab("HIDE_SUBTITLE"); } catch (_) {}
@@ -211,6 +251,7 @@ function cleanup() {
   try { workletNode?.disconnect(); sourceNode?.disconnect(); playerNode?.disconnect(); } catch (_) {}
   try { mediaStream?.getTracks().forEach(track => track.stop()); } catch (_) {}
   try { ctx?.close(); } catch (_) {}
+  outputBufferedBytes = 0;
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
