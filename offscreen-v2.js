@@ -5,7 +5,7 @@ const WS_BASE = "wss://generativelanguage.googleapis.com/ws/google.ai.generative
 const INPUT_RATE = 16000;
 const OUTPUT_RATE = 24000;
 const DEFAULT_MODEL = "gemini-3.5-live-translate-preview";
-const VOICE = "Kore";
+const DEFAULT_VOICE = "Gacrux";
 const MIN_AUDIO_BYTES = 320;
 const INPUT_PEAK_LIMIT = 260;
 const OUTPUT_PEAK_LIMIT = 160;
@@ -16,7 +16,7 @@ const MAX_BUFFER_MS = 3000;
 let ctx = null, ws = null, workletNode = null, playerNode = null;
 let mediaStream = null, sourceNode = null;
 let stopped = false, setupDone = false, everConnected = false;
-let mode = "gemini", model = DEFAULT_MODEL, apiKey = "", targetLang = "fa";
+let mode = "gemini", model = DEFAULT_MODEL, apiKey = "", targetLang = "fa", voice = DEFAULT_VOICE;
 let startedAt = 0, lagSent = false, turnText = "", reconnectAttempts = 0;
 let ducked = false, hideTimer = null;
 let outputBufferedBytes = 0;
@@ -63,6 +63,7 @@ async function main(init) {
   mode = init.voiceMode === "chrome" ? "chrome" : "gemini";
   model = (init.model || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
   targetLang = (init.targetLang || "fa").trim() || "fa";
+  voice = (init.voice || DEFAULT_VOICE).trim() || DEFAULT_VOICE;
 
   try {
     ctx = new AudioContext({ latencyHint: "interactive" });
@@ -101,8 +102,22 @@ async function startCapture(streamId) {
 }
 
 function setupMessage() {
-  const setup = { setup: { model: model.includes("/") ? model : "models/" + model, generationConfig: { responseModalities: ["AUDIO"], translationConfig: { targetLanguageCode: targetLang, echoTargetLanguage: true } } } };
-  if (mode === "gemini") setup.setup.generationConfig.speechConfig = { voiceConfig: { prebuiltVoiceConfig: { voiceName: VOICE } } };
+  const setup = {
+    setup: {
+      model: model.includes("/") ? model : "models/" + model,
+      generationConfig: {
+        responseModalities: ["AUDIO"],
+        translationConfig: { targetLanguageCode: targetLang, echoTargetLanguage: true }
+      }
+    }
+  };
+
+  if (mode === "gemini") {
+    setup.setup.generationConfig.speechConfig = {
+      voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } }
+    };
+  }
+
   return setup;
 }
 
@@ -187,8 +202,6 @@ function emitSubtitle(final) {
   let text = subtitleBuffer.replace(/\s+/g, " ").trim();
   if (!text) return;
 
-  // Keep live subtitles compact. Prefer the latest sentence/phrase while the
-  // model is streaming, then emit the complete turn at turnComplete.
   if (!final && text.length > 180) {
     const boundary = Math.max(text.lastIndexOf(". "), text.lastIndexOf("! "), text.lastIndexOf("? "), text.lastIndexOf("، "), text.lastIndexOf(".\n"));
     if (boundary > 40) text = text.slice(boundary + 1).trim();
@@ -236,8 +249,6 @@ function startMetrics() {
     if (stopped) return;
     const bufferedMs = outputBufferedBytes / (OUTPUT_RATE * 2) * 1000;
     report({ metrics: { bufferedMs: Number(bufferedMs.toFixed(1)), targetBufferMs: TARGET_BUFFER_MS, reconnects: reconnectAttempts, audioAgeMs: lastAudioAt ? Math.max(0, performance.now() - lastAudioAt) : null } });
-    // This is telemetry for the UI and future adaptive control. The actual
-    // PCM ring buffer remains the realtime source of truth.
   }, 1000);
 }
 function fail(message) { report({ error: message }); cleanup(); }
