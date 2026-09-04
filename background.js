@@ -45,7 +45,7 @@ async function start({ streamId, tabId }) {
   });
 
   try {
-    await chrome.runtime.sendMessage({ type: "offscreen_start", streamId, ...cfg });
+    await chrome.runtime.sendMessage({ type: "offscreen_start", streamId, provider: cfg.provider, baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model, voice: cfg.voice, targetLang: cfg.targetLang });
   } catch (e) { console.error("DubWave failed sending offscreen_start:", e); }
   running = true; keepAlive();
   notify({ text: `Connecting to ${cfg.provider}...` });

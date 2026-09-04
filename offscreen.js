@@ -1,45 +1,47 @@
 
 // DubWave offscreen audio engine.
-// Captures tab audio, sends it to Gemini Live, receives translated speech,
-// plays it back, and sends subtitle/ducking events to the page.
+// Captures tab audio, sends it to the selected realtime LLM provider,
+// receives translated speech, plays it back, and sends subtitle/ducking events to the page.
 
-const WS_BASE =
-  "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=";
+let CTX = null;
+let WS = null;
+let WORKLET_NODE = null;
+let PLAYER_NODE = null;
+let MEDIA_STREAM = null;
+let SOURCE_NODE = null;
+
+let STOPPED = false;
+let SETUP_DONE = false;
+let EVER_CONNECTED = false;
+
+let PROVIDER = "gemini";
+let BASE_URL = "";
+let API_KEY = "";
+let MODEL = "";
+let TARGET_LANG = "fa";
+let VOICE = "";
+
+let STARTED_AT = 0;
+let LAG_SENT = false;
+
+let NEXT_PLAY_TIME = 0;
+let TURN_TEXT = "";
+let RECONNECT_ATTEMPTS = 0;
+
+let DUCKED = false;
+let HIDE_TIMER = null;
 
 const OUTPUT_RATE = 24000;
 const MIN_AUDIO_BYTES = 320;
-const DEFAULT_MODEL = "gemini-3.5-live-translate-preview";
-const VOICE = "Kore";
+const DEFAULT_GEMINI_MODEL = "gemini-3.5-live-translate-preview";
+const DEFAULT_OPENAI_MODEL = "gpt-4o-realtime-preview";
+const GEMINI_VOICE = "Kore";
+const OPENAI_VOICE = "alloy";
 const MAX_RECONNECTS = 5;
 
 // Noise gates. Adjust if too aggressive or too weak.
 const INPUT_PEAK_LIMIT = 260;
 const OUTPUT_PEAK_LIMIT = 160;
-
-let ctx = null;
-let ws = null;
-let workletNode = null;
-let mediaStream = null;
-let sourceNode = null;
-
-let stopped = false;
-let setupDone = false;
-let everConnected = false;
-
-let mode = "gemini";
-let model = DEFAULT_MODEL;
-let apiKey = "";
-let targetLang = "fa";
-
-let startedAt = 0;
-let lagSent = false;
-
-let nextPlayTime = 0;
-let turnText = "";
-let reconnectAttempts = 0;
-
-let ducked = false;
-let hideTimer = null;
 
 const report = (msg) =>
   chrome.runtime.sendMessage(Object.assign({ type: "engine_status" }, msg)).catch(() => {});
@@ -52,15 +54,15 @@ function sendToTab(type, payload) {
 }
 
 function duckOn() {
-  if (!ducked) {
-    ducked = true;
+  if (!DUCKED) {
+    DUCKED = true;
     sendToTab("DUCK_AUDIO");
   }
 }
 
 function duckOff() {
-  if (ducked) {
-    ducked = false;
+  if (DUCKED) {
+    DUCKED = false;
     sendToTab("UNDUCK_AUDIO");
   }
 }
@@ -72,12 +74,12 @@ function showSubtitle(text) {
 }
 
 function hideSubtitleSoon() {
-  if (hideTimer) clearTimeout(hideTimer);
+  if (HIDE_TIMER) clearTimeout(HIDE_TIMER);
 
-  hideTimer = setTimeout(() => {
+  HIDE_TIMER = setTimeout(() => {
     sendToTab("HIDE_SUBTITLE");
     duckOff();
-    hideTimer = null;
+    HIDE_TIMER = null;
   }, 800);
 }
 
@@ -110,9 +112,26 @@ function toArrayBuffer(data) {
 async function main(init) {
   const streamId = init && init.streamId;
 
-  apiKey = ((init && init.apiKey) || "").trim();
-  if (!apiKey) {
-    fail("No Gemini API key. Open DubWave settings and add one.");
+  PROVIDER = (init && init.provider) || "gemini";
+  BASE_URL = ((init && init.baseUrl) || "").trim();
+  API_KEY = ((init && init.apiKey) || "").trim();
+  MODEL = ((init && init.model) || "").trim();
+  TARGET_LANG = ((init && init.targetLang) || "fa").trim();
+  VOICE = ((init && init.voice) || "").trim();
+
+  // Set defaults based on provider
+  if (!MODEL) {
+    if (PROVIDER === "gemini") MODEL = DEFAULT_GEMINI_MODEL;
+    else if (PROVIDER === "openai") MODEL = DEFAULT_OPENAI_MODEL;
+  }
+
+  if (!VOICE) {
+    if (PROVIDER === "gemini") VOICE = GEMINI_VOICE;
+    else if (PROVIDER === "openai") VOICE = OPENAI_VOICE;
+  }
+
+  if (!API_KEY) {
+    fail("No API key. Open DubWave settings and add one.");
     return;
   }
 
@@ -121,14 +140,15 @@ async function main(init) {
     return;
   }
 
-  mode = init && init.voiceMode === "chrome" ? "chrome" : "gemini";
-  model = (((init && init.model) || DEFAULT_MODEL).trim() || DEFAULT_MODEL);
-  targetLang = (((init && init.targetLang) || "fa").trim() || "fa");
-
   try {
-    ctx = new AudioContext();
-    await ctx.audioWorklet.addModule("processor.js");
-    await ctx.resume();
+    CTX = new AudioContext({ latencyHint: "interactive" });
+    await CTX.audioWorklet.addModule("processor.js");
+    await CTX.audioWorklet.addModule("audio-player.js");
+    await CTX.resume();
+
+    // Create output player node for resampled playback
+    PLAYER_NODE = new AudioWorkletNode(CTX, "realtime-pcm-player", { outputChannelCount: [1] });
+    PLAYER_NODE.connect(CTX.destination);
 
     await startCapture(streamId);
     openSocket();
@@ -142,7 +162,7 @@ async function startCapture(streamId) {
     throw new Error("No capture stream id passed to offscreen engine.");
   }
 
-  mediaStream = await navigator.mediaDevices.getUserMedia({
+  MEDIA_STREAM = await navigator.mediaDevices.getUserMedia({
     audio: {
       mandatory: {
         chromeMediaSource: "tab",
@@ -151,21 +171,21 @@ async function startCapture(streamId) {
     },
   });
 
-  sourceNode = ctx.createMediaStreamSource(mediaStream);
-  workletNode = new AudioWorkletNode(ctx, "pcm-capture");
+  SOURCE_NODE = CTX.createMediaStreamSource(MEDIA_STREAM);
+  WORKLET_NODE = new AudioWorkletNode(CTX, "pcm-capture");
 
-  const mute = ctx.createGain();
+  const mute = CTX.createGain();
   mute.gain.value = 0;
 
-  sourceNode.connect(workletNode);
-  workletNode.connect(mute);
-  mute.connect(ctx.destination);
+  SOURCE_NODE.connect(WORKLET_NODE);
+  WORKLET_NODE.connect(mute);
+  mute.connect(CTX.destination);
 
-  workletNode.port.onmessage = (e) => {
-    if (stopped) return;
+  WORKLET_NODE.port.onmessage = (e) => {
+    if (STOPPED) return;
 
     if (e.data && e.data.type === "stats") return;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!WS || WS.readyState !== WebSocket.OPEN) return;
 
     let payload = e.data;
 
@@ -191,48 +211,73 @@ async function startCapture(streamId) {
 
     const pcm = new Int16Array(arrayBuffer);
 
-    // Do not send silence/noise floor to Gemini.
+    // Do not send silence/noise floor to the AI provider.
     if (isSilentInt16(pcm, INPUT_PEAK_LIMIT)) return;
 
-    if (!startedAt) startedAt = Date.now();
+    if (!STARTED_AT) STARTED_AT = Date.now();
 
     const b64 = arrayBufferToBase64(new Uint8Array(arrayBuffer));
 
-    ws.send(
-      JSON.stringify({
-        realtimeInput: {
-          audio: {
-            data: b64,
-            mimeType: "audio/pcm;rate=16000",
+    // Send audio based on provider protocol
+    if (PROVIDER === "gemini") {
+      WS.send(
+        JSON.stringify({
+          realtimeInput: {
+            audio: {
+              data: b64,
+              mimeType: "audio/pcm;rate=16000",
+            },
           },
-        },
-      })
-    );
+        })
+      );
+    } else if (PROVIDER === "openai" || PROVIDER === "custom") {
+      // OpenAI Realtime API format (and compatible providers like Ollama, 9router, Omniroute)
+      WS.send(
+        JSON.stringify({
+          type: "input_audio_buffer.append",
+          audio: b64,
+        })
+      );
+    }
   };
 }
 
 function setupMessage() {
-  const modelName = model.includes("/") ? model : "models/" + model;
+  let msg = {};
 
-  const msg = {
-    setup: {
-      model: modelName,
-      generationConfig: {
-        responseModalities: ["AUDIO"],
-        translationConfig: {
-          targetLanguageCode: targetLang,
-          echoTargetLanguage: true,
+  if (PROVIDER === "gemini") {
+    const modelName = MODEL.includes("/") ? MODEL : "models/" + MODEL;
+    msg = {
+      setup: {
+        model: modelName,
+        generationConfig: {
+          responseModalities: ["AUDIO"],
+          translationConfig: {
+            targetLanguageCode: TARGET_LANG,
+            echoTargetLanguage: true,
+          },
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: VOICE,
+              },
+            },
+          },
         },
       },
-    },
-  };
-
-  if (mode === "gemini") {
-    msg.setup.generationConfig.speechConfig = {
-      voiceConfig: {
-        prebuiltVoiceConfig: {
-          voiceName: VOICE,
-        },
+    };
+  } else if (PROVIDER === "openai" || PROVIDER === "custom") {
+    // OpenAI Realtime API session configuration (for Ollama, 9router, Omniroute, etc.)
+    msg = {
+      type: "session.update",
+      session: {
+        modalities: ["text", "audio"],
+        instructions: `You are a real-time translator. Translate all audio to ${TARGET_LANG}.`,
+        voice: VOICE || OPENAI_VOICE,
+        input_audio_format: "pcm16",
+        output_audio_format: "pcm16",
+        input_audio_transcription: { model: "whisper-1" },
+        turn_detection: { type: "server_vad" },
       },
     };
   }
@@ -240,21 +285,48 @@ function setupMessage() {
   return msg;
 }
 
+function normalizeWsUrl(url, fallback) {
+  if (!url) return fallback;
+  if (url.startsWith("https://")) return "wss://" + url.slice(8);
+  if (url.startsWith("http://")) return "ws://" + url.slice(7);
+  return url;
+}
+
 function openSocket() {
-  const url = WS_BASE + encodeURIComponent(apiKey);
+  let url = normalizeWsUrl(BASE_URL, "");
 
-  ws = new WebSocket(url);
-  ws.binaryType = "arraybuffer";
+  if (PROVIDER === "gemini") {
+    if (!url) {
+      url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=";
+    }
+    if (!url.includes("key=")) {
+      url = url + (url.includes("?") ? "&" : "?") + "key=" + API_KEY;
+    }
+  } else if (PROVIDER === "openai" || PROVIDER === "custom") {
+    if (!url) {
+      url = "wss://api.openai.com/v1/realtime";
+    }
+    // Add model and api_key for OpenAI-compatible endpoints
+    if (!/[?&]model=/.test(url) && MODEL) {
+      url += (url.includes("?") ? "&" : "?") + "model=" + encodeURIComponent(MODEL);
+    }
+    if (!/[?&]api_key=/.test(url)) {
+      url += (url.includes("?") ? "&" : "?") + "api_key=" + encodeURIComponent(API_KEY);
+    }
+  }
 
-  ws.onopen = () => {
-    everConnected = true;
-    reconnectAttempts = 0;
+  WS = new WebSocket(url);
+  WS.binaryType = "arraybuffer";
 
-    ws.send(JSON.stringify(setupMessage()));
-    report({ text: "Connected. Translating..." });
+  WS.onopen = () => {
+    EVER_CONNECTED = true;
+    RECONNECT_ATTEMPTS = 0;
+
+    WS.send(JSON.stringify(setupMessage()));
+    report({ text: `Connected to ${PROVIDER}. Translating...` });
   };
 
-  ws.onmessage = (ev) => {
+  WS.onmessage = (ev) => {
     if (typeof ev.data === "string") {
       handleServerContent(ev.data);
       return;
@@ -273,36 +345,36 @@ function openSocket() {
       } catch (e) {}
     }
 
-    if (!setupDone) {
-      setupDone = true;
+    if (!SETUP_DONE) {
+      SETUP_DONE = true;
     }
 
     playPCM16(ev.data);
   };
 
-  ws.onerror = () => {
-    if (!everConnected) {
+  WS.onerror = () => {
+    if (!EVER_CONNECTED) {
       fail(
-        "Connection failed. Check your VPN/proxy, internet connection, and Gemini API key."
+        `Connection failed. Check your VPN/proxy, internet connection, and ${PROVIDER} API key.`
       );
     }
   };
 
-  ws.onclose = () => {
-    if (stopped) return;
+  WS.onclose = () => {
+    if (STOPPED) return;
 
-    if (!everConnected) return;
+    if (!EVER_CONNECTED) return;
 
-    if (!setupDone) {
+    if (!SETUP_DONE) {
       fail(
-        "Server closed the connection before session start. Check model name and API key."
+        `Server closed the connection before session start. Check model name and API key for ${PROVIDER}.`
       );
       return;
     }
 
-    if (reconnectAttempts < MAX_RECONNECTS) {
-      reconnectAttempts++;
-      setTimeout(openSocket, Math.min(1000 * reconnectAttempts, 5000));
+    if (RECONNECT_ATTEMPTS < MAX_RECONNECTS) {
+      RECONNECT_ATTEMPTS++;
+      setTimeout(openSocket, Math.min(1000 * RECONNECT_ATTEMPTS, 5000));
     } else {
       fail("Connection lost after retries. Stop, then start DubWave again.");
     }
@@ -318,6 +390,13 @@ function handleServerContent(raw) {
     return;
   }
 
+  // Handle OpenAI Realtime API responses (and compatible providers)
+  if (PROVIDER === "openai" || PROVIDER === "custom") {
+    handleOpenAIResponse(msg);
+    return;
+  }
+
+  // Handle Gemini API responses
   if (msg.error) {
     fail("API error: " + (msg.error.message || JSON.stringify(msg.error)));
     return;
@@ -329,7 +408,7 @@ function handleServerContent(raw) {
     if (ack.error) {
       fail("Setup rejected: " + (ack.error.message || JSON.stringify(ack.error)));
     } else {
-      setupDone = true;
+      SETUP_DONE = true;
       report({ text: "Connected. Translating..." });
     }
 
@@ -340,11 +419,13 @@ function handleServerContent(raw) {
   if (!sc) return;
 
   if (sc.interrupted) {
-    if (hideTimer) clearTimeout(hideTimer);
-    hideTimer = null;
+    if (HIDE_TIMER) clearTimeout(HIDE_TIMER);
+    HIDE_TIMER = null;
 
-    nextPlayTime = ctx.currentTime;
-    turnText = "";
+    if (PLAYER_NODE) {
+      PLAYER_NODE.port.postMessage({ type: "reset" });
+    }
+    TURN_TEXT = "";
 
     duckOff();
     sendToTab("HIDE_SUBTITLE");
@@ -353,8 +434,8 @@ function handleServerContent(raw) {
   if (sc.modelTurn && Array.isArray(sc.modelTurn.parts)) {
     for (const part of sc.modelTurn.parts) {
       if (part.text) {
-        turnText += part.text;
-        showSubtitle(turnText.trim());
+        TURN_TEXT += part.text;
+        showSubtitle(TURN_TEXT.trim());
       }
 
       if (part.inlineData && part.inlineData.data) {
@@ -362,29 +443,76 @@ function handleServerContent(raw) {
       }
     }
 
-    if (!lagSent && startedAt) {
-      lagSent = true;
+    if (!LAG_SENT && STARTED_AT) {
+      LAG_SENT = true;
       report({
         text: "Playing translated audio...",
-        lag: ((Date.now() - startedAt) / 1000).toFixed(1),
+        lag: ((Date.now() - STARTED_AT) / 1000).toFixed(1),
       });
     }
   }
 
   if (sc.turnComplete) {
-    const finalText = turnText.trim();
+    const finalText = TURN_TEXT.trim();
 
-    if (mode === "chrome" && finalText) {
+    if (finalText) {
       speak(finalText);
     }
 
     hideSubtitleSoon();
-    turnText = "";
+    TURN_TEXT = "";
+  }
+}
+
+function handleOpenAIResponse(msg) {
+  const type = msg.type;
+
+  if (type === "error") {
+    fail("API error: " + (msg.error?.message || JSON.stringify(msg.error)));
+    return;
+  }
+
+  if (type === "session.created" || type === "session.updated") {
+    SETUP_DONE = true;
+    report({ text: `Connected to ${PROVIDER}. Translating...` });
+    return;
+  }
+
+  if (type === "response.audio.delta" && msg.delta) {
+    const audioData = msg.delta;
+    if (audioData) {
+      playPCM16(base64ToArrayBuffer(audioData));
+    }
+    return;
+  }
+
+  if (type === "response.audio_transcript.delta" && msg.delta) {
+    TURN_TEXT += msg.delta;
+    showSubtitle(TURN_TEXT.trim());
+
+    if (!LAG_SENT && STARTED_AT) {
+      LAG_SENT = true;
+      report({
+        text: "Playing translated audio...",
+        lag: ((Date.now() - STARTED_AT) / 1000).toFixed(1),
+      });
+    }
+    return;
+  }
+
+  if (type === "response.done") {
+    const finalText = TURN_TEXT.trim();
+    if (finalText) {
+      speak(finalText);
+    }
+    hideSubtitleSoon();
+    TURN_TEXT = "";
+    return;
   }
 }
 
 function playPCM16(arrayBuffer) {
-  if (!ctx || stopped) return;
+  if (!PLAYER_NODE || STOPPED) return;
 
   if (
     !arrayBuffer ||
@@ -394,41 +522,21 @@ function playPCM16(arrayBuffer) {
     return;
   }
 
-  const int16 = new Int16Array(arrayBuffer);
-  if (!int16.length) return;
+  const pcm = new Int16Array(arrayBuffer);
+  if (!pcm.length) return;
 
   // Suppress silent/hissy output frames.
-  if (isSilentInt16(int16, OUTPUT_PEAK_LIMIT)) return;
+  if (isSilentInt16(pcm, OUTPUT_PEAK_LIMIT)) return;
 
-  if (hideTimer) {
-    clearTimeout(hideTimer);
-    hideTimer = null;
+  if (HIDE_TIMER) {
+    clearTimeout(HIDE_TIMER);
+    HIDE_TIMER = null;
   }
 
   duckOn();
 
-  const float = new Float32Array(int16.length);
-
-  for (let i = 0; i < int16.length; i++) {
-    float[i] = int16[i] / 32768;
-  }
-
-  const audioBuffer = ctx.createBuffer(1, float.length, OUTPUT_RATE);
-  audioBuffer.copyToChannel(float, 0);
-
-  const src = ctx.createBufferSource();
-  src.buffer = audioBuffer;
-  src.connect(ctx.destination);
-
-  const now = ctx.currentTime;
-
-  // Low-latency playback buffer.
-  if (nextPlayTime < now + 0.02) {
-    nextPlayTime = now + 0.02;
-  }
-
-  src.start(nextPlayTime);
-  nextPlayTime += audioBuffer.duration;
+  // Send PCM to the player worklet for proper resampling
+  PLAYER_NODE.port.postMessage({ type: "pcm", buffer: pcm.buffer }, [pcm.buffer]);
 }
 
 function base64ToArrayBuffer(b64) {
@@ -459,11 +567,11 @@ function speak(text) {
   speechSynthesis.cancel();
 
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = targetLang;
+  utterance.lang = TARGET_LANG;
 
   const voices = speechSynthesis.getVoices();
   const match = voices.find((v) =>
-    v.lang.toLowerCase().startsWith(targetLang.toLowerCase())
+    v.lang.toLowerCase().startsWith(TARGET_LANG.toLowerCase())
   );
 
   if (match) utterance.voice = match;
@@ -477,39 +585,40 @@ function fail(message) {
 }
 
 function cleanup() {
-  stopped = true;
+  STOPPED = true;
 
-  if (hideTimer) clearTimeout(hideTimer);
+  if (HIDE_TIMER) clearTimeout(HIDE_TIMER);
 
   try {
+    if (PLAYER_NODE) {
+      PLAYER_NODE.port.postMessage({ type: "reset" });
+    }
     duckOff();
     sendToTab("HIDE_SUBTITLE");
   } catch (e) {}
 
   try {
-    if (ws) ws.close();
+    if (WS) WS.close();
   } catch (e) {}
 
   try {
-    if (workletNode) workletNode.disconnect();
+    if (WORKLET_NODE) WORKLET_NODE.disconnect();
+    if (PLAYER_NODE) PLAYER_NODE.disconnect();
+    if (SOURCE_NODE) SOURCE_NODE.disconnect();
   } catch (e) {}
 
-  try {
-    if (sourceNode) sourceNode.disconnect();
-  } catch (e) {}
-
-  if (mediaStream) {
-    mediaStream.getTracks().forEach((track) => track.stop());
+  if (MEDIA_STREAM) {
+    MEDIA_STREAM.getTracks().forEach((track) => track.stop());
   }
 
   try {
-    if (ctx) ctx.close();
+    if (CTX) CTX.close();
   } catch (e) {}
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.type === "offscreen_stop") {
-    stopped = true;
+    STOPPED = true;
     cleanup();
   }
 });
