@@ -3,6 +3,7 @@
 
 let running = false;
 let currentTabId = null;
+const OFFSCREEN_PATH = "offscreen.html";
 
 function keepAlive() {
   const timer = setInterval(() => {
@@ -11,11 +12,33 @@ function keepAlive() {
   }, 20000);
 }
 
+async function hasOffscreenDocument() {
+  // chrome.offscreen.hasDocument() was added in Chrome 150. Use the
+  // runtime.getContexts() fallback on older MV3 Chromium versions.
+  if (typeof chrome.offscreen.hasDocument === "function") {
+    return chrome.offscreen.hasDocument();
+  }
+
+  if (typeof chrome.runtime.getContexts === "function") {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"],
+      documentUrls: [chrome.runtime.getURL(OFFSCREEN_PATH)],
+    });
+    return contexts.length > 0;
+  }
+
+  return false;
+}
+
 async function ensureOffscreen() {
-  const hasDocument = await chrome.offscreen.hasDocument();
-  if (hasDocument) return;
+  if (await hasOffscreenDocument()) return;
+
   const ready = new Promise((resolve) => {
-    const timeout = setTimeout(resolve, 3000);
+    const timeout = setTimeout(() => {
+      chrome.runtime.onMessage.removeListener(listener);
+      resolve();
+    }, 5000);
+
     const listener = (msg) => {
       if (msg?.type === "offscreen_ready") {
         clearTimeout(timeout);
@@ -23,13 +46,16 @@ async function ensureOffscreen() {
         resolve();
       }
     };
+
     chrome.runtime.onMessage.addListener(listener);
   });
+
   await chrome.offscreen.createDocument({
-    url: "offscreen.html",
+    url: OFFSCREEN_PATH,
     reasons: ["USER_MEDIA", "AUDIO_PLAYBACK"],
     justification: "Capture tab audio and route it through the selected realtime AI or LiveKit transport.",
   });
+
   await ready;
 }
 
@@ -69,14 +95,10 @@ async function start({ streamId, tabId }) {
     return { ok: false, error: "No LLM API key. Open Settings and add one." };
   }
 
-  if (cfg.transport === "llm" && (!cfg.baseUrl || !cfg.baseUrl.trim())) {
-    // Gemini can use its built-in endpoint, while OpenAI/custom providers need
-    // an explicit realtime base URL.
-    if (cfg.provider !== "gemini") {
-      try { await chrome.tabs.update(tabId, { muted: false }); } catch (_) {}
-      currentTabId = null;
-      return { ok: false, error: "LLM Base URL is required for OpenAI/custom realtime mode." };
-    }
+  if (cfg.transport === "llm" && (!cfg.baseUrl || !cfg.baseUrl.trim()) && cfg.provider !== "gemini") {
+    try { await chrome.tabs.update(tabId, { muted: false }); } catch (_) {}
+    currentTabId = null;
+    return { ok: false, error: "LLM Base URL is required for OpenAI/custom realtime mode." };
   }
 
   try {
@@ -106,7 +128,7 @@ async function stop() {
     currentTabId = null;
   }
   try {
-    if (await chrome.offscreen.hasDocument()) {
+    if (await hasOffscreenDocument()) {
       try { await chrome.runtime.sendMessage({ type: "offscreen_stop" }); } catch (_) {}
       await chrome.offscreen.closeDocument();
     }
