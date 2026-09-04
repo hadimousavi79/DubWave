@@ -164,8 +164,6 @@ function geminiSetup() {
         outputAudioTranscription: {},
         translationConfig: {
           targetLanguageCode: targetLang,
-          // Echo is useful for dubbing clips that already use the target
-          // language. Gemini documents this as the intended behavior.
           echoTargetLanguage: true,
         },
       },
@@ -173,8 +171,8 @@ function geminiSetup() {
   };
 }
 
-function openAISetupModern() {
-  const instructions = [
+function translationInstructions() {
+  return [
     "You are a real-time video dubbing translator.",
     `Translate every spoken input into ${targetLang}.`,
     "Do not answer, explain, summarize, or add commentary.",
@@ -182,13 +180,15 @@ function openAISetupModern() {
     "Speak only the translated text.",
     "Keep output concise and synchronized for real-time dubbing.",
   ].join(" ");
+}
 
+function openAISetupModern() {
   return {
     type: "session.update",
     session: {
       type: "realtime",
       model,
-      instructions,
+      instructions: translationInstructions(),
       output_modalities: ["audio"],
       audio: {
         input: {
@@ -227,12 +227,7 @@ function openAISetupLegacy() {
         prefix_padding_ms: 300,
         silence_duration_ms: 450,
       },
-      instructions: [
-        "You are a real-time video dubbing translator.",
-        `Translate every spoken input into ${targetLang}.`,
-        "Do not answer or add commentary. Speak only the translation.",
-        "Preserve names, numbers, technical terms, tone, and meaning.",
-      ].join(" "),
+      instructions: translationInstructions(),
     },
   };
 }
@@ -247,10 +242,7 @@ async function main(init) {
   voice = String(init?.voice || "").trim();
   voiceMode = init?.voiceMode === "chrome" ? "chrome" : "gemini";
 
-  if (transport === "livekit") {
-    return startLiveKit(init);
-  }
-
+  if (transport === "livekit") return startLiveKit(init);
   if (!apiKey) return fail("No LLM API key. Open DubWave Settings and add one.");
   if (!init?.streamId) return fail("No capture stream id received. Restart DubWave.");
 
@@ -301,9 +293,6 @@ async function startCapture(streamId) {
     const ab = toArrayBuffer(event.data);
     if (!ab || ab.byteLength < MIN_AUDIO_BYTES || ab.byteLength % 2 !== 0) return;
 
-    // Do not apply a hard peak gate here. Server VAD/noise reduction is much
-    // better at deciding whether speech is present and a client gate can clip
-    // quiet consonants and make the translation model miss words.
     if (!startedAt) startedAt = Date.now();
     const data = b64(new Uint8Array(ab));
 
@@ -344,14 +333,8 @@ function queueOutputPcm(ab) {
   hideTimer = null;
   duckOn();
   lastAudioAt = performance.now();
-  outputBufferedBytes = Math.min(
-    outputBufferedBytes + ab.byteLength,
-    DEFAULTS.outputRate * 2 * 3
-  );
+  outputBufferedBytes = Math.min(outputBufferedBytes + ab.byteLength, DEFAULTS.outputRate * 2 * 3);
 
-  // The worklet owns one continuous PCM queue and resamples 24 kHz to the
-  // device rate. This removes packet-boundary clicks and the pitch/time error
-  // caused by playing 24 kHz PCM at a 48 kHz device rate.
   const copy = new Uint8Array(ab.slice(0));
   playerNode.port.postMessage({ type: "pcm", buffer: copy.buffer }, [copy.buffer]);
 }
@@ -409,12 +392,7 @@ function openLLMSocket(useFallbackAuth = false) {
     turnText = "";
     resetPlayer();
 
-    ws.send(JSON.stringify(
-      provider === "gemini"
-        ? geminiSetup()
-        : openAISetupModern()
-    ));
-
+    ws.send(JSON.stringify(provider === "gemini" ? geminiSetup() : openAISetupModern()));
     report({
       text: `Connected to ${provider === "gemini" ? "Gemini" : "OpenAI-compatible realtime"}. Translating...`,
     });
@@ -440,9 +418,7 @@ function openLLMSocket(useFallbackAuth = false) {
     queueOutputPcm(data);
   };
 
-  ws.onerror = () => {
-    // The close handler supplies the actionable error/retry path.
-  };
+  ws.onerror = () => {};
 
   ws.onclose = (event) => {
     if (stopped || !ws) return;
@@ -477,6 +453,17 @@ function openLLMSocket(useFallbackAuth = false) {
   };
 }
 
+function tryCustomAuthFallback(detail) {
+  if (provider === "custom" && !authFallbackAttempted) {
+    authFallbackAttempted = true;
+    try { ws?.close(); } catch (_) {}
+    setTimeout(() => openLLMSocket(true), 100);
+    report({ text: "Retrying custom gateway authentication..." });
+    return true;
+  }
+  return false;
+}
+
 function handleMessage(raw) {
   let msg;
   try {
@@ -486,9 +473,13 @@ function handleMessage(raw) {
   }
 
   if (msg.error) {
-    // Some older OpenAI-compatible gateways reject the modern nested audio
-    // session schema but still implement the legacy Realtime event contract.
-    if (provider !== "gemini" && !legacyOpenAISetup) {
+    const error = msg.error || {};
+    const detail = error.message || error.code || JSON.stringify(error);
+    const authError = /401|403|auth|api.?key|unauthoriz|forbidden|credential/i.test(`${error.code || ""} ${detail}`);
+
+    if (authError && tryCustomAuthFallback(detail)) return;
+
+    if (provider !== "gemini" && !legacyOpenAISetup && !authError) {
       legacyOpenAISetup = true;
       try {
         ws.send(JSON.stringify(openAISetupLegacy()));
@@ -496,7 +487,6 @@ function handleMessage(raw) {
       } catch (_) {}
     }
 
-    const detail = msg.error.message || msg.error.code || JSON.stringify(msg.error);
     fail("API error: " + detail);
     return;
   }
