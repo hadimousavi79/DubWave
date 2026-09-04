@@ -18,7 +18,9 @@ async function ensureOffscreen() {
     const timeout = setTimeout(resolve, 3000);
     const listener = (msg) => {
       if (msg?.type === "offscreen_ready") {
-        clearTimeout(timeout); chrome.runtime.onMessage.removeListener(listener); resolve();
+        clearTimeout(timeout);
+        chrome.runtime.onMessage.removeListener(listener);
+        resolve();
       }
     };
     chrome.runtime.onMessage.addListener(listener);
@@ -35,20 +37,64 @@ async function start({ streamId, tabId }) {
   if (running) return { ok: false, error: "Already running." };
   if (!streamId) return { ok: false, error: "No audio stream." };
   currentTabId = tabId;
+
   try { await chrome.tabs.update(tabId, { muted: true }); } catch (_) {}
-  try { await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content.js"] }); } catch (e) { console.warn("DubWave injection failed:", e); }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ["content.js"],
+    });
+  } catch (e) {
+    console.warn("DubWave injection failed:", e);
+  }
+
   await ensureOffscreen();
 
   const cfg = await chrome.storage.local.get({
-    provider: "gemini", baseUrl: "", apiKey: "", model: "gemini-3.5-live-translate-preview",
-    voiceMode: "gemini", voice: "Gacrux", targetLang: "fa", transport: "llm", livekitUrl: "", livekitToken: ""
+    provider: "gemini",
+    baseUrl: "",
+    apiKey: "",
+    model: "gemini-3.5-live-translate-preview",
+    voiceMode: "gemini",
+    voice: "Gacrux",
+    targetLang: "fa",
+    transport: "llm",
+    livekitUrl: "",
+    livekitToken: "",
   });
+
+  if (cfg.transport === "llm" && (!cfg.apiKey || !cfg.apiKey.trim())) {
+    try { await chrome.tabs.update(tabId, { muted: false }); } catch (_) {}
+    currentTabId = null;
+    return { ok: false, error: "No LLM API key. Open Settings and add one." };
+  }
+
+  if (cfg.transport === "llm" && (!cfg.baseUrl || !cfg.baseUrl.trim())) {
+    // Gemini can use its built-in endpoint, while OpenAI/custom providers need
+    // an explicit realtime base URL.
+    if (cfg.provider !== "gemini") {
+      try { await chrome.tabs.update(tabId, { muted: false }); } catch (_) {}
+      currentTabId = null;
+      return { ok: false, error: "LLM Base URL is required for OpenAI/custom realtime mode." };
+    }
+  }
 
   try {
     await chrome.runtime.sendMessage({ type: "offscreen_start", streamId, ...cfg });
-  } catch (e) { console.error("DubWave failed sending offscreen_start:", e); }
-  running = true; keepAlive();
-  notify({ text: cfg.transport === "livekit" ? "Connecting to LiveKit..." : `Connecting to ${cfg.provider}...` });
+  } catch (e) {
+    console.error("DubWave failed sending offscreen_start:", e);
+    try { await chrome.tabs.update(tabId, { muted: false }); } catch (_) {}
+    currentTabId = null;
+    return { ok: false, error: "Could not start the audio engine: " + e.message };
+  }
+
+  running = true;
+  keepAlive();
+  notify({
+    text: cfg.transport === "livekit"
+      ? "Connecting to LiveKit..."
+      : `Connecting to ${cfg.provider}...`,
+  });
   return { ok: true };
 }
 
@@ -69,17 +115,40 @@ async function stop() {
 }
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  if (running && tabId === currentTabId) { await stop(); notify({ text: "Tab closed. DubWave stopped." }); }
+  if (running && tabId === currentTabId) {
+    await stop();
+    notify({ text: "Tab closed. DubWave stopped." });
+  }
 });
-function notify(msg) { chrome.runtime.sendMessage(Object.assign({ type: "popupStatus" }, msg)).catch(() => {}); }
+
+function notify(msg) {
+  chrome.runtime.sendMessage(Object.assign({ type: "popupStatus" }, msg)).catch(() => {});
+}
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
-  if (msg.type === "getState") { sendResponse({ running }); return; }
-  if (msg.type === "engine_status") { if (msg.error) { stop(); notify(msg); } else notify({ text: msg.text, lag: msg.lag }); return; }
-  if (msg.type === "OFFSCREEN_TO_TAB") { if (currentTabId != null) chrome.tabs.sendMessage(currentTabId, msg.payload).catch(() => {}); return; }
+  if (msg.type === "getState") {
+    sendResponse({ running });
+    return;
+  }
+  if (msg.type === "engine_status") {
+    if (msg.error) {
+      stop();
+      notify(msg);
+    } else {
+      notify({ text: msg.text, lag: msg.lag });
+    }
+    return;
+  }
+  if (msg.type === "OFFSCREEN_TO_TAB") {
+    if (currentTabId != null) chrome.tabs.sendMessage(currentTabId, msg.payload).catch(() => {});
+    return;
+  }
   if (msg.type === "start" || msg.type === "stop") {
-    (async () => { const result = msg.type === "start" ? await start(msg) : await stop(); sendResponse(result); })();
+    (async () => {
+      const result = msg.type === "start" ? await start(msg) : await stop();
+      sendResponse(result);
+    })();
     return true;
   }
 });
