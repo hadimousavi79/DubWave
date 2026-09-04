@@ -1,4 +1,3 @@
-
 const $ = (id) => document.getElementById(id);
 
 const btn = $("toggle");
@@ -50,7 +49,7 @@ function render() {
     dot.className = state.hasKey ? "dot" : "dot err";
     statusText.textContent = state.hasKey
       ? "Ready. Click Start on a tab with audio."
-      : "Add your Gemini API key in Settings first.";
+      : "Add your LLM API key in Settings first.";
   }
 }
 
@@ -94,9 +93,7 @@ btn.addEventListener("click", async () => {
         lastFocusedWindow: true,
       });
 
-      if (!tab || !tab.id) {
-        throw new Error("No active tab found.");
-      }
+      if (!tab || !tab.id) throw new Error("No active tab found.");
 
       const streamId = await chrome.tabCapture.getMediaStreamId({
         targetTabId: tab.id,
@@ -104,7 +101,7 @@ btn.addEventListener("click", async () => {
 
       const res = await chrome.runtime.sendMessage({
         type: "start",
-        streamId: streamId,
+        streamId,
         tabId: tab.id,
       }).catch(() => null);
 
@@ -139,13 +136,8 @@ chrome.runtime.onMessage.addListener((msg) => {
     return;
   }
 
-  if (msg.lag) {
-    lagEl.textContent = "▼ " + msg.lag + "s";
-  }
-
-  if (msg.text && state.running) {
-    statusText.textContent = msg.text;
-  }
+  if (msg.lag) lagEl.textContent = "▼ " + msg.lag + "s";
+  if (msg.text && state.running) statusText.textContent = msg.text;
 });
 
 refresh();
