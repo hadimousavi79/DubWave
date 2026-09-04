@@ -31,7 +31,7 @@
     </select>
 
     <label for="baseUrl">LLM Base URL</label>
-    <input type="url" id="baseUrl" placeholder="wss://... (leave default for selected provider)">
+    <input type="url" id="baseUrl" placeholder="https://your-host/v1 or wss://your-host/v1/realtime">
 
     <label for="apiKey">LLM API Key</label>
     <input type="password" id="apiKey" placeholder="Paste your provider API key">
@@ -45,7 +45,7 @@
     </select>
 
     <label for="voice">Gemini / Realtime Voice</label>
-    <select id="voice"><option value="Gacrux">Gacrux</option><option value="Alnilam">Alnilam</option><option value="Orus">Orus</option><option value="Charon">Charon</option><option value="Algenib">Algenib</option><option value="Sulafat">Sulafat</option><option value="Kore">Kore</option><option value="Aoede">Aoede</option><option value="Puck">Puck</option><option value="alloy">alloy (OpenAI)</option></select>
+    <select id="voice"><option value="Gacrux">Gacrux</option><option value="Alnilam">Alnilam</option><option value="Orus">Orus</option><option value="Charon">Charon</option><option value="Algenib">Algenib</option><option value="Sulafat">Sulafat</option><option value="Kore">Kore</option><option value="Aoede">Aoede</option><option value="Puck">Puck</option><option value="alloy">alloy (OpenAI)</option><option value="marin">marin (OpenAI)</option><option value="cedar">cedar (OpenAI)</option></select>
 
     <label for="transport">Realtime Transport</label>
     <select id="transport"><option value="llm">Direct LLM connection</option><option value="livekit">LiveKit room</option></select>
@@ -60,7 +60,7 @@
     <label for="voiceMode">Fallback Voice</label>
     <select id="voiceMode"><option value="gemini">AI generated voice</option><option value="chrome">Chrome built-in TTS</option></select>
 
-    <div class="note"><b>Custom LLM:</b> DubWave accepts a configurable realtime WebSocket base URL and API key. OpenAI-compatible gateways such as your own proxy can be used when they implement the realtime event format. <br><br><b>LiveKit:</b> choose LiveKit when a LiveKit room/agent is handling the AI pipeline. A participant token is required; do not put a LiveKit API secret in this extension.</div>
+    <div class="note"><b>Custom / OpenAI-compatible:</b> enter either <code>https://your-host/v1</code> or the full <code>wss://.../v1/realtime</code> endpoint. DubWave converts http(s) to ws(s), adds <code>/realtime</code> when needed, and sends the OpenAI Realtime event format. The server must support browser WebSocket authentication using the OpenAI-compatible realtime subprotocol or an <code>api_key</code> query parameter.<br><br><b>Gemini:</b> Gemini Live Translation uses 16 kHz mono PCM input and 24 kHz PCM output. DubWave now keeps a continuous audio playback buffer and avoids playing each network packet as a separate audio buffer, which prevents pitch shifts, clicks, and packet-boundary noise. The dedicated Live Translation model controls its own translation voice.<br><br><b>LiveKit:</b> choose LiveKit when a LiveKit room/agent is handling the AI pipeline. A participant token is required; do not put a LiveKit API secret in this extension.</div>
     <button id="save">Save Settings</button>
     <div id="status"></div>
   </div>
