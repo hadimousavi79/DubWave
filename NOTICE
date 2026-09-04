@@ -10,4 +10,4 @@ Project identity:
 - This notice does not grant permission to imply that a fork, derivative, or redistribution is the official DubWave project or endorsed by Hadimousavi79.
 
 Third-party software:
-- DubWave can bundle the LiveKit JavaScript client. LiveKit and its SDK are independent projects and are licensed under Apache License 2.0 by their respective copyright holders. The bundled LiveKit client must retain its own applicable notices.
+- This branch has no LiveKit dependency or bundled LiveKit SDK.
