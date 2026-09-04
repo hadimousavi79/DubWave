@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "DubWave — Real-time AI Voice Dubbing",
   "short_name": "DubWave",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Real-time AI voice dubbing with Gemini, OpenAI-compatible realtime endpoints, custom LLM URLs, and optional LiveKit transport.",
   "permissions": ["tabCapture", "offscreen", "storage", "activeTab", "scripting"],
   "host_permissions": ["<all_urls>"],
@@ -10,5 +10,5 @@
   "action": {"default_popup": "popup.html", "default_title": "DubWave", "default_icon": {"16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png"}},
   "options_ui": {"page": "options.html", "open_in_tab": true},
   "icons": {"16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png"},
-  "web_accessible_resources": [{"resources": ["processor.js", "audio-player.js", "offscreen.html", "livekit-client.js"], "matches": ["<all_urls>"]}]
+  "web_accessible_resources": [{"resources": ["processor.js", "audio-player.js", "offscreen.html", "offscreen-v2.js", "livekit-client.js"], "matches": ["<all_urls>"]}]
 }
