@@ -1,6 +1,6 @@
 {
   "name": "dubwave",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": false,
   "description": "DubWave browser extension with pluggable LLM endpoints and optional LiveKit transport.",
   "license": "Apache-2.0",
