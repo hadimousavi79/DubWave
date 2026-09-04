@@ -1,26 +1,52 @@
 // DubWave input AudioWorklet.
-// Converts browser tab audio to mono PCM16 at 16 kHz using a continuous
-// linear-interpolation resampler. Phase is preserved across process() calls.
+// Converts captured tab audio to mono PCM16 at the sample rate required by
+// the selected realtime provider. The target rate is configured by the
+// offscreen engine (Gemini: 16 kHz, OpenAI-compatible: 24 kHz).
 
 class PcmCaptureProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.targetRate = 16000;
+
     this.sourceRate = sampleRate;
+    this.targetRate = 16000;
     this.step = this.sourceRate / this.targetRate;
-    this.output = new Int16Array(320); // 20 ms @ 16 kHz
+    this.output = new Int16Array(320); // 20 ms @ 16 kHz by default
     this.outputFrames = 0;
     this.sourcePosition = 0;
     this.previousSample = 0;
     this.hasPreviousSample = false;
+    this.dc = 0;
+
+    this.port.onmessage = (event) => {
+      const msg = event.data || {};
+      if (msg.type !== "configure") return;
+
+      const rate = Number(msg.targetRate);
+      if (!Number.isFinite(rate) || rate < 8000 || rate > 48000) return;
+
+      this.targetRate = rate;
+      this.step = this.sourceRate / this.targetRate;
+      this.output = new Int16Array(Math.max(160, Math.round(this.targetRate * 0.02)));
+      this.outputFrames = 0;
+      this.sourcePosition = 0;
+      this.previousSample = 0;
+      this.hasPreviousSample = false;
+    };
   }
 
   emit(sample) {
-    const clamped = Math.max(-1, Math.min(1, sample));
-    this.output[this.outputFrames++] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+    // Remove a small DC offset before quantizing. This avoids wasting PCM
+    // headroom on a constant bias introduced by some capture paths.
+    this.dc += 0.0005 * (sample - this.dc);
+    const centered = sample - this.dc;
+    const clamped = Math.max(-1, Math.min(1, centered));
+    this.output[this.outputFrames++] = clamped < 0
+      ? clamped * 0x8000
+      : clamped * 0x7fff;
+
     if (this.outputFrames === this.output.length) {
       this.port.postMessage(this.output.buffer, [this.output.buffer]);
-      this.output = new Int16Array(320);
+      this.output = new Int16Array(Math.max(160, Math.round(this.targetRate * 0.02)));
       this.outputFrames = 0;
     }
   }
@@ -28,14 +54,17 @@ class PcmCaptureProcessor extends AudioWorkletProcessor {
   process(inputs) {
     const input = inputs[0];
     if (!input || !input[0]) return true;
+
     const frames = input[0].length;
     if (!frames) return true;
 
+    const channels = input.length;
     const mono = new Float32Array(frames);
+
     for (let i = 0; i < frames; i++) {
       let sum = 0;
-      for (let c = 0; c < input.length; c++) sum += input[c][i] || 0;
-      mono[i] = sum / input.length;
+      for (let c = 0; c < channels; c++) sum += input[c][i] || 0;
+      mono[i] = sum / channels;
     }
 
     if (!this.hasPreviousSample) {
