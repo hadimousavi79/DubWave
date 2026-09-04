@@ -1,0 +1,13 @@
+DubWave
+Copyright 2026 Hadimousavi79
+
+DubWave is the original project of Hadimousavi79. Preserve this attribution and the Apache License when redistributing the project or derivative works.
+
+Official project: https://github.com/hadimousavi79/DubWave
+
+Project identity:
+- The name "DubWave" and the project branding identify the original project maintained by Hadimousavi79.
+- This notice does not grant permission to imply that a fork, derivative, or redistribution is the official DubWave project or endorsed by Hadimousavi79.
+
+Third-party software:
+- DubWave can bundle the LiveKit JavaScript client. LiveKit and its SDK are independent projects and are licensed under Apache License 2.0 by their respective copyright holders. The bundled LiveKit client must retain its own applicable notices.
