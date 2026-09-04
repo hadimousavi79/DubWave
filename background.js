@@ -1,5 +1,5 @@
 // DubWave service worker.
-// Orchestrates tab capture, the selected realtime LLM, or a LiveKit room.
+// Orchestrates tab capture and the selected realtime LLM.
 
 let running = false;
 let currentTabId = null;
@@ -26,7 +26,7 @@ async function ensureOffscreen() {
   await chrome.offscreen.createDocument({
     url: "offscreen.html",
     reasons: ["USER_MEDIA", "AUDIO_PLAYBACK"],
-    justification: "Capture tab audio and route it through the selected realtime AI or LiveKit transport.",
+    justification: "Capture tab audio and route it through the selected realtime AI service.",
   });
   await ready;
 }
@@ -41,14 +41,14 @@ async function start({ streamId, tabId }) {
 
   const cfg = await chrome.storage.local.get({
     provider: "gemini", baseUrl: "", apiKey: "", model: "gemini-3.5-live-translate-preview",
-    voiceMode: "gemini", voice: "Gacrux", targetLang: "fa", transport: "llm", livekitUrl: "", livekitToken: ""
+    voiceMode: "gemini", voice: "Gacrux", targetLang: "fa"
   });
 
   try {
     await chrome.runtime.sendMessage({ type: "offscreen_start", streamId, ...cfg });
   } catch (e) { console.error("DubWave failed sending offscreen_start:", e); }
   running = true; keepAlive();
-  notify({ text: cfg.transport === "livekit" ? "Connecting to LiveKit..." : `Connecting to ${cfg.provider}...` });
+  notify({ text: `Connecting to ${cfg.provider}...` });
   return { ok: true };
 }
 
