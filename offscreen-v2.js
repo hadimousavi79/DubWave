@@ -1,275 +1,122 @@
-// DubWave v2 realtime offscreen engine.
-// Streaming capture -> Gemini Live -> adaptive PCM buffering.
+// DubWave realtime engine.
+// Supports Gemini Live, OpenAI-compatible Realtime WebSockets, and LiveKit media transport.
 
-const WS_BASE = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=";
-const INPUT_RATE = 16000;
-const OUTPUT_RATE = 24000;
-const DEFAULT_MODEL = "gemini-3.5-live-translate-preview";
-const DEFAULT_VOICE = "Gacrux";
-const MIN_AUDIO_BYTES = 320;
-const INPUT_PEAK_LIMIT = 260;
-const OUTPUT_PEAK_LIMIT = 160;
-const MAX_RECONNECTS = 5;
-const TARGET_BUFFER_MS = 140;
-const MAX_BUFFER_MS = 3000;
+const DEFAULTS = {
+  geminiUrl: "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+  openaiUrl: "wss://api.openai.com/v1/realtime",
+  geminiModel: "gemini-3.5-live-translate-preview",
+  openaiModel: "gpt-4o-realtime-preview",
+  voice: "Gacrux",
+  inputRate: 16000,
+  outputRate: 24000,
+};
+const MIN_AUDIO_BYTES = 320, INPUT_PEAK_LIMIT = 260, OUTPUT_PEAK_LIMIT = 160;
+const MAX_RECONNECTS = 5, MAX_BUFFER_MS = 3000;
 
-let ctx = null, ws = null, workletNode = null, playerNode = null;
-let mediaStream = null, sourceNode = null;
+let ctx = null, ws = null, room = null, livekitTrack = null;
+let workletNode = null, playerNode = null, mediaStream = null, sourceNode = null;
 let stopped = false, setupDone = false, everConnected = false;
-let mode = "gemini", model = DEFAULT_MODEL, apiKey = "", targetLang = "fa", voice = DEFAULT_VOICE;
-let startedAt = 0, lagSent = false, turnText = "", reconnectAttempts = 0;
-let ducked = false, hideTimer = null;
-let outputBufferedBytes = 0;
-let lastAudioAt = 0;
-let subtitleBuffer = "";
-let metricsTimer = null;
+let provider = "gemini", model = DEFAULTS.geminiModel, apiKey = "", baseUrl = "";
+let transport = "llm", targetLang = "fa", voice = DEFAULTS.voice, voiceMode = "gemini";
+let startedAt = 0, lagSent = false, turnText = "", reconnectAttempts = 0, ducked = false, hideTimer = null;
+let outputBufferedBytes = 0, lastAudioAt = 0, subtitleBuffer = "", metricsTimer = null;
 
 const report = (msg) => chrome.runtime.sendMessage({ type: "engine_status", ...msg }).catch(() => {});
 const sendToTab = (type, payload = {}) => chrome.runtime.sendMessage({ type: "OFFSCREEN_TO_TAB", payload: { type, ...payload } }).catch(() => {});
-
-function isSilentInt16(pcm, limit) {
-  if (!pcm || !pcm.length) return true;
-  let peak = 0;
-  const step = Math.max(1, Math.floor(pcm.length / 256));
-  for (let i = 0; i < pcm.length; i += step) peak = Math.max(peak, Math.abs(pcm[i]));
-  return peak < limit;
-}
-
-function toArrayBuffer(data) {
-  if (data instanceof ArrayBuffer) return data.slice(0);
-  if (ArrayBuffer.isView(data)) return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-  return null;
-}
-
-function arrayBufferToBase64(bytes) {
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  return btoa(binary);
-}
-
-function base64ToArrayBuffer(value) {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
-}
+const isSilentInt16 = (pcm, limit) => { if (!pcm?.length) return true; let peak=0, step=Math.max(1,Math.floor(pcm.length/256)); for(let i=0;i<pcm.length;i+=step) peak=Math.max(peak,Math.abs(pcm[i])); return peak<limit; };
+const toArrayBuffer = (data) => data instanceof ArrayBuffer ? data.slice(0) : ArrayBuffer.isView(data) ? data.buffer.slice(data.byteOffset,data.byteOffset+data.byteLength) : null;
+function b64(bytes) { let s=""; for(let i=0;i<bytes.length;i+=0x8000) s+=String.fromCharCode(...bytes.subarray(i,i+0x8000)); return btoa(s); }
+function fromB64(value) { const s=atob(value), a=new Uint8Array(s.length); for(let i=0;i<s.length;i++) a[i]=s.charCodeAt(i); return a.buffer; }
 
 async function main(init) {
-  apiKey = ((init?.apiKey) || "").trim();
-  if (!apiKey) return fail("No Gemini API key. Open DubWave settings and add one.");
+  provider = init.provider || "gemini"; transport = init.transport || "llm"; apiKey=(init.apiKey||"").trim();
+  baseUrl=(init.baseUrl||"").trim(); model=(init.model||"").trim(); targetLang=(init.targetLang||"fa").trim();
+  voice=(init.voice||DEFAULTS.voice).trim(); voiceMode=init.voiceMode==="chrome"?"chrome":"gemini";
+  if (transport === "llm" && !apiKey) return fail("No LLM API key. Open DubWave settings and add one.");
+  if (transport === "livekit") return startLiveKit(init);
   if (!init?.streamId) return fail("No capture stream id received. Restart DubWave.");
-
-  mode = init.voiceMode === "chrome" ? "chrome" : "gemini";
-  model = (init.model || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
-  targetLang = (init.targetLang || "fa").trim() || "fa";
-  voice = (init.voice || DEFAULT_VOICE).trim() || DEFAULT_VOICE;
-
+  if (!model) model = provider === "openai" ? DEFAULTS.openaiModel : DEFAULTS.geminiModel;
   try {
-    ctx = new AudioContext({ latencyHint: "interactive" });
-    await ctx.audioWorklet.addModule("processor.js");
-    await ctx.audioWorklet.addModule("audio-player.js");
-    await ctx.resume();
-    playerNode = new AudioWorkletNode(ctx, "realtime-pcm-player", { outputChannelCount: [1] });
-    playerNode.connect(ctx.destination);
-    await startCapture(init.streamId);
-    startMetrics();
-    openSocket();
-  } catch (error) {
-    fail("Setup error: " + error.message);
-  }
+    ctx=new AudioContext({latencyHint:"interactive"});
+    await ctx.audioWorklet.addModule("processor.js"); await ctx.audioWorklet.addModule("audio-player.js"); await ctx.resume();
+    playerNode=new AudioWorkletNode(ctx,"realtime-pcm-player",{outputChannelCount:[1]}); playerNode.connect(ctx.destination);
+    await startCapture(init.streamId); startMetrics(); openLLMSocket();
+  } catch(e) { fail("Setup error: "+e.message); }
 }
 
 async function startCapture(streamId) {
-  mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { mandatory: { chromeMediaSource: "tab", chromeMediaSourceId: streamId } } });
-  sourceNode = ctx.createMediaStreamSource(mediaStream);
-  workletNode = new AudioWorkletNode(ctx, "pcm-capture");
-  const mute = ctx.createGain();
-  mute.gain.value = 0;
-  sourceNode.connect(workletNode);
-  workletNode.connect(mute);
-  mute.connect(ctx.destination);
-
-  workletNode.port.onmessage = (event) => {
-    if (stopped || !ws || ws.readyState !== WebSocket.OPEN) return;
-    const arrayBuffer = toArrayBuffer(event.data);
-    if (!arrayBuffer || arrayBuffer.byteLength < MIN_AUDIO_BYTES || arrayBuffer.byteLength % 2) return;
-    const pcm = new Int16Array(arrayBuffer);
-    if (isSilentInt16(pcm, INPUT_PEAK_LIMIT)) return;
-    if (!startedAt) startedAt = Date.now();
-    ws.send(JSON.stringify({ realtimeInput: { audio: { data: arrayBufferToBase64(new Uint8Array(arrayBuffer)), mimeType: "audio/pcm;rate=16000" } } }));
+  mediaStream=await navigator.mediaDevices.getUserMedia({audio:{mandatory:{chromeMediaSource:"tab",chromeMediaSourceId:streamId}}});
+  sourceNode=ctx.createMediaStreamSource(mediaStream); workletNode=new AudioWorkletNode(ctx,"pcm-capture");
+  const mute=ctx.createGain(); mute.gain.value=0; sourceNode.connect(workletNode); workletNode.connect(mute); mute.connect(ctx.destination);
+  workletNode.port.onmessage=(event)=>{
+    if(stopped || !ws || ws.readyState!==WebSocket.OPEN) return;
+    const ab=toArrayBuffer(event.data); if(!ab || ab.byteLength<MIN_AUDIO_BYTES || ab.byteLength%2) return;
+    const pcm=new Int16Array(ab); if(isSilentInt16(pcm,INPUT_PEAK_LIMIT)) return; if(!startedAt) startedAt=Date.now();
+    const data=b64(new Uint8Array(ab));
+    if(provider==="gemini") ws.send(JSON.stringify({realtimeInput:{audio:{data,mimeType:"audio/pcm;rate=16000"}}}));
+    else ws.send(JSON.stringify({type:"input_audio_buffer.append",audio:data}));
   };
 }
 
-function setupMessage() {
-  const setup = {
-    setup: {
-      model: model.includes("/") ? model : "models/" + model,
-      generationConfig: {
-        responseModalities: ["AUDIO"],
-        translationConfig: { targetLanguageCode: targetLang, echoTargetLanguage: true }
-      }
-    }
-  };
-
-  if (mode === "gemini") {
-    setup.setup.generationConfig.speechConfig = {
-      voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } }
-    };
-  }
-
-  return setup;
+function normalizeWsUrl(url, fallback) {
+  if(!url) return fallback;
+  if(url.startsWith("https://")) return "wss://"+url.slice(8);
+  if(url.startsWith("http://")) return "ws://"+url.slice(7);
+  return url;
 }
-
-function openSocket() {
-  ws = new WebSocket(WS_BASE + encodeURIComponent(apiKey));
-  ws.binaryType = "arraybuffer";
-  ws.onopen = () => {
-    everConnected = true;
-    reconnectAttempts = 0;
-    setupDone = false;
-    ws.send(JSON.stringify(setupMessage()));
-    report({ text: "Connected. Translating..." });
-  };
-  ws.onmessage = (event) => {
-    if (typeof event.data === "string") return handleServerContent(event.data);
-    if (!event.data?.byteLength) return;
-    const bytes = new Uint8Array(event.data);
-    if (bytes[0] === 123 || bytes[0] === 91) {
-      try { return handleServerContent(new TextDecoder("utf-8", { fatal: true }).decode(event.data)); } catch (_) {}
-    }
-    playPCM16(event.data);
-  };
-  ws.onerror = () => { if (!everConnected) fail("Connection failed. Check your network/proxy and Gemini API key."); };
-  ws.onclose = () => {
-    if (stopped || !everConnected) return;
-    if (!setupDone) return fail("Server closed the connection before session start. Check model name and API key.");
-    if (reconnectAttempts < MAX_RECONNECTS) {
-      reconnectAttempts++;
-      setTimeout(openSocket, Math.min(1000 * reconnectAttempts, 5000));
-    } else fail("Connection lost after retries. Stop, then start DubWave again.");
-  };
+function openLLMSocket() {
+  const fallback=provider==="gemini"?DEFAULTS.geminiUrl:DEFAULTS.openaiUrl;
+  let url=normalizeWsUrl(baseUrl,fallback);
+  if(provider==="gemini") url += (url.includes("?")?"&":"?")+"key="+encodeURIComponent(apiKey);
+  else if(!/[?&]model=/.test(url)) url += (url.includes("?")?"&":"?")+"model="+encodeURIComponent(model);
+  if(provider!=="gemini") url += "&api_key="+encodeURIComponent(apiKey);
+  ws=new WebSocket(url); ws.binaryType="arraybuffer";
+  ws.onopen=()=>{everConnected=true;reconnectAttempts=0;setupDone=false;ws.send(JSON.stringify(provider==="gemini"?geminiSetup():openAISetup()));report({text:"Connected. Translating..."});};
+  ws.onmessage=(event)=>{ if(typeof event.data==="string") return handleMessage(event.data); if(event.data?.byteLength) playPCM16(event.data); };
+  ws.onerror=()=>{if(!everConnected) fail("Connection failed. Check endpoint, network/proxy, and API key.");};
+  ws.onclose=()=>{if(stopped||!everConnected)return;if(!setupDone)return fail("Server closed the realtime session. Check model, endpoint, and credentials.");if(reconnectAttempts<MAX_RECONNECTS){reconnectAttempts++;setTimeout(openLLMSocket,Math.min(1000*reconnectAttempts,5000));}else fail("Connection lost after retries. Stop, then start DubWave again.");};
 }
+function geminiSetup(){ return {setup:{model:model.includes("/")?model:"models/"+model,generationConfig:{responseModalities:["AUDIO"],translationConfig:{targetLanguageCode:targetLang,echoTargetLanguage:true},speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName:voice}}}}}}; }
+function openAISetup(){ return {type:"session.update",session:{modalities:["text","audio"],voice:voice||"alloy",input_audio_format:"pcm16",output_audio_format:"pcm16",instructions:`You are a real-time dubbing engine. Translate the incoming spoken content into ${targetLang}. Preserve meaning and tone. Output translated speech and transcript.`}}; }
 
-function handleServerContent(raw) {
-  let msg;
-  try { msg = JSON.parse(raw); } catch (_) { return; }
-  if (msg.error) return fail("API error: " + (msg.error.message || JSON.stringify(msg.error)));
-  if (msg.setupComplete) {
-    if (msg.setupComplete.error) return fail("Setup rejected: " + (msg.setupComplete.error.message || JSON.stringify(msg.setupComplete.error)));
-    setupDone = true;
-    report({ text: "Connected. Translating..." });
-    return;
-  }
-
-  const content = msg.serverContent;
-  if (!content) return;
-  if (content.interrupted) {
-    playerNode?.port.postMessage({ type: "reset" });
-    outputBufferedBytes = 0;
-    turnText = "";
-    subtitleBuffer = "";
-    sendToTab("HIDE_SUBTITLE");
-    duckOff();
-  }
-
-  for (const part of content.modelTurn?.parts || []) {
-    if (part.text) {
-      turnText += part.text;
-      subtitleBuffer += part.text;
-      emitSubtitle(false);
-    }
-    if (part.inlineData?.data) playPCM16(base64ToArrayBuffer(part.inlineData.data));
-  }
-
-  if (!lagSent && startedAt && content.modelTurn) {
-    lagSent = true;
-    report({ text: "Playing translated audio...", lag: ((Date.now() - startedAt) / 1000).toFixed(2) });
-  }
-
-  if (content.turnComplete) {
-    emitSubtitle(true);
-    if (mode === "chrome" && turnText.trim()) speak(turnText.trim());
-    scheduleHide();
-    turnText = "";
-    subtitleBuffer = "";
-    lagSent = false;
-    startedAt = 0;
-  }
+function handleMessage(raw){
+  let msg; try{msg=JSON.parse(raw);}catch(_){return;}
+  if(msg.error) return fail("API error: "+(msg.error.message||JSON.stringify(msg.error)));
+  if(provider==="gemini") return handleGemini(msg);
+  if(msg.type==="session.created"||msg.type==="session.updated"){setupDone=true;report({text:"Connected. Translating..."});return;}
+  if(msg.type==="response.audio.delta"&&msg.delta) playPCM16(fromB64(msg.delta));
+  if((msg.type==="response.audio_transcript.delta"||msg.type==="response.output_text.delta")&&msg.delta){turnText+=msg.delta;subtitleBuffer+=msg.delta;emitSubtitle(false);}
+  if(msg.type==="response.done"){emitSubtitle(true);scheduleHide();turnText="";subtitleBuffer="";lagSent=false;startedAt=0;if(voiceMode==="chrome"&&turnText.trim())speak(turnText.trim());}
 }
+function handleGemini(msg){
+  if(msg.setupComplete){if(msg.setupComplete.error)return fail("Setup rejected: "+(msg.setupComplete.error.message||JSON.stringify(msg.setupComplete.error)));setupDone=true;return report({text:"Connected. Translating..."});}
+  const content=msg.serverContent;if(!content)return;
+  if(content.interrupted){playerNode?.port.postMessage({type:"reset"});outputBufferedBytes=0;turnText="";subtitleBuffer="";sendToTab("HIDE_SUBTITLE");duckOff();}
+  for(const part of content.modelTurn?.parts||[]){if(part.text){turnText+=part.text;subtitleBuffer+=part.text;emitSubtitle(false);}if(part.inlineData?.data)playPCM16(fromB64(part.inlineData.data));}
+  if(!lagSent&&startedAt&&content.modelTurn){lagSent=true;report({text:"Playing translated audio...",lag:((Date.now()-startedAt)/1000).toFixed(2)});}
+  if(content.turnComplete){emitSubtitle(true);if(voiceMode==="chrome"&&turnText.trim())speak(turnText.trim());scheduleHide();turnText="";subtitleBuffer="";lagSent=false;startedAt=0;}
+}
+function emitSubtitle(final){let text=subtitleBuffer.replace(/\s+/g," ").trim();if(!text)return;if(!final&&text.length>180){const b=Math.max(text.lastIndexOf(". "),text.lastIndexOf("! "),text.lastIndexOf("? "),text.lastIndexOf("، "));text=b>40?text.slice(b+1).trim():text.slice(-180).trim();}sendToTab("SHOW_SUBTITLE",{text});}
+function playPCM16(ab){if(!playerNode||!ab||ab.byteLength<MIN_AUDIO_BYTES||ab.byteLength%2)return;const pcm=new Int16Array(ab);if(isSilentInt16(pcm,OUTPUT_PEAK_LIMIT))return;if(hideTimer)clearTimeout(hideTimer);hideTimer=null;duckOn();const copy=new Int16Array(pcm);outputBufferedBytes=Math.min(outputBufferedBytes+copy.byteLength,DEFAULTS.outputRate*2*MAX_BUFFER_MS/1000);lastAudioAt=performance.now();playerNode.port.postMessage({type:"pcm",buffer:copy.buffer},[copy.buffer]);}
 
-function emitSubtitle(final) {
-  let text = subtitleBuffer.replace(/\s+/g, " ").trim();
-  if (!text) return;
-
-  if (!final && text.length > 180) {
-    const boundary = Math.max(text.lastIndexOf(". "), text.lastIndexOf("! "), text.lastIndexOf("? "), text.lastIndexOf("، "), text.lastIndexOf(".\n"));
-    if (boundary > 40) text = text.slice(boundary + 1).trim();
-    else text = text.slice(-180).trim();
-  }
-  sendToTab("SHOW_SUBTITLE", { text: formatSubtitle(text) });
+async function startLiveKit(init){
+  if(!init.livekitUrl||!init.livekitToken)return fail("LiveKit server URL and participant token are required.");
+  if(!globalThis.LivekitClient)return fail("LiveKit client is not bundled. Run npm install && npm run build, then load the dist/ extension.");
+  try{
+    ctx=new AudioContext({latencyHint:"interactive"}); await ctx.audioWorklet.addModule("processor.js"); await ctx.audioWorklet.addModule("audio-player.js"); await ctx.resume();
+    playerNode=new AudioWorkletNode(ctx,"realtime-pcm-player",{outputChannelCount:[1]});playerNode.connect(ctx.destination);
+    mediaStream=await navigator.mediaDevices.getUserMedia({audio:{mandatory:{chromeMediaSource:"tab",chromeMediaSourceId:init.streamId}}});
+    const track=mediaStream.getAudioTracks()[0]; room=new LivekitClient.Room();
+    room.on(LivekitClient.RoomEvent.TrackSubscribed,(remoteTrack)=>{if(remoteTrack.kind===LivekitClient.Track.Kind.Audio){const el=remoteTrack.attach();el.autoplay=true;el.volume=1;document.body.appendChild(el);}});
+    await room.connect(init.livekitUrl,init.livekitToken); livekitTrack=new LivekitClient.LocalAudioTrack(track); await room.localParticipant.publishTrack(livekitTrack);
+    report({text:"Connected to LiveKit. Waiting for dubbing agent..."}); setupDone=true;
+  }catch(e){fail("LiveKit error: "+e.message);}
 }
-
-function formatSubtitle(text) {
-  return String(text || "").replace(/\s+/g, " ").trim();
-}
-
-function playPCM16(arrayBuffer) {
-  if (!playerNode || !arrayBuffer || arrayBuffer.byteLength < MIN_AUDIO_BYTES || arrayBuffer.byteLength % 2) return;
-  const pcm = new Int16Array(arrayBuffer);
-  if (isSilentInt16(pcm, OUTPUT_PEAK_LIMIT)) return;
-  if (hideTimer) clearTimeout(hideTimer);
-  hideTimer = null;
-  duckOn();
-  const copy = new Int16Array(pcm.length);
-  copy.set(pcm);
-  outputBufferedBytes = Math.min(outputBufferedBytes + copy.byteLength, OUTPUT_RATE * 2 * MAX_BUFFER_MS / 1000);
-  lastAudioAt = performance.now();
-  playerNode.port.postMessage({ type: "pcm", buffer: copy.buffer }, [copy.buffer]);
-}
-
-function duckOn() { if (!ducked) { ducked = true; sendToTab("DUCK_AUDIO"); } }
-function duckOff() { if (ducked) { ducked = false; sendToTab("UNDUCK_AUDIO"); } }
-function scheduleHide() {
-  if (hideTimer) clearTimeout(hideTimer);
-  hideTimer = setTimeout(() => { sendToTab("HIDE_SUBTITLE"); duckOff(); hideTimer = null; }, 800);
-}
-function speak(text) {
-  if (!("speechSynthesis" in window)) return;
-  speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = targetLang;
-  const voice = speechSynthesis.getVoices().find(v => v.lang.toLowerCase().startsWith(targetLang.toLowerCase()));
-  if (voice) utterance.voice = voice;
-  speechSynthesis.speak(utterance);
-}
-function startMetrics() {
-  if (metricsTimer) clearInterval(metricsTimer);
-  metricsTimer = setInterval(() => {
-    if (stopped) return;
-    const bufferedMs = outputBufferedBytes / (OUTPUT_RATE * 2) * 1000;
-    report({ metrics: { bufferedMs: Number(bufferedMs.toFixed(1)), targetBufferMs: TARGET_BUFFER_MS, reconnects: reconnectAttempts, audioAgeMs: lastAudioAt ? Math.max(0, performance.now() - lastAudioAt) : null } });
-  }, 1000);
-}
-function fail(message) { report({ error: message }); cleanup(); }
-function cleanup() {
-  stopped = true;
-  if (metricsTimer) clearInterval(metricsTimer);
-  if (hideTimer) clearTimeout(hideTimer);
-  try { playerNode?.port.postMessage({ type: "reset" }); } catch (_) {}
-  try { duckOff(); sendToTab("HIDE_SUBTITLE"); } catch (_) {}
-  try { ws?.close(); } catch (_) {}
-  try { workletNode?.disconnect(); sourceNode?.disconnect(); playerNode?.disconnect(); } catch (_) {}
-  try { mediaStream?.getTracks().forEach(track => track.stop()); } catch (_) {}
-  try { ctx?.close(); } catch (_) {}
-  outputBufferedBytes = 0;
-}
-
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.type === "offscreen_stop") cleanup();
-  if (msg?.type === "offscreen_start") {
-    stopped = false;
-    main(msg);
-  }
-});
-chrome.runtime.sendMessage({ type: "offscreen_ready" }).catch(() => {});
+function duckOn(){if(!ducked){ducked=true;sendToTab("DUCK_AUDIO");}} function duckOff(){if(ducked){ducked=false;sendToTab("UNDUCK_AUDIO");}}
+function scheduleHide(){if(hideTimer)clearTimeout(hideTimer);hideTimer=setTimeout(()=>{sendToTab("HIDE_SUBTITLE");duckOff();hideTimer=null;},800);}
+function speak(text){if(!("speechSynthesis"in window))return;speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);u.lang=targetLang;const v=speechSynthesis.getVoices().find(x=>x.lang.toLowerCase().startsWith(targetLang.toLowerCase()));if(v)u.voice=v;speechSynthesis.speak(u);}
+function startMetrics(){if(metricsTimer)clearInterval(metricsTimer);metricsTimer=setInterval(()=>{if(stopped)return;report({metrics:{bufferedMs:Number((outputBufferedBytes/(DEFAULTS.outputRate*2)*1000).toFixed(1)),reconnects:reconnectAttempts,audioAgeMs:lastAudioAt?Math.max(0,performance.now()-lastAudioAt):null}});},1000);}
+function fail(message){report({error:message});cleanup();}
+function cleanup(){stopped=true;if(metricsTimer)clearInterval(metricsTimer);if(hideTimer)clearTimeout(hideTimer);try{playerNode?.port.postMessage({type:"reset"});}catch(_){}try{duckOff();sendToTab("HIDE_SUBTITLE");}catch(_){}try{ws?.close();}catch(_){}try{livekitTrack?.stop();room?.disconnect();}catch(_){}try{workletNode?.disconnect();sourceNode?.disconnect();playerNode?.disconnect();}catch(_){}try{mediaStream?.getTracks().forEach(t=>t.stop());}catch(_){}try{ctx?.close();}catch(_){}room=null;livekitTrack=null;outputBufferedBytes=0;}
+chrome.runtime.onMessage.addListener((msg)=>{if(msg?.type==="offscreen_stop")cleanup();if(msg?.type==="offscreen_start"){stopped=false;main(msg);}});
+chrome.runtime.sendMessage({type:"offscreen_ready"}).catch(()=>{});
