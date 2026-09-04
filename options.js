@@ -1,53 +1,65 @@
 const $ = (id) => document.getElementById(id);
 
-const DEFAULT_MODEL = "gemini-3.5-live-translate-preview";
-const DEFAULT_VOICE = "Gacrux";
-
 const DEFAULTS = {
+  provider: "gemini",
+  baseUrl: "",
   apiKey: "",
   targetLang: "fa",
   voiceMode: "gemini",
-  voice: DEFAULT_VOICE,
-  model: DEFAULT_MODEL,
+  voice: "Gacrux",
+  model: "gemini-3.5-live-translate-preview",
+  transport: "llm",
+  livekitUrl: "",
+  livekitToken: "",
 };
+
+const PROVIDER_DEFAULTS = {
+  gemini: { baseUrl: "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent", model: "gemini-3.5-live-translate-preview" },
+  openai: { baseUrl: "wss://api.openai.com/v1/realtime", model: "gpt-4o-realtime-preview" },
+  custom: { baseUrl: "", model: "" },
+};
+
+function providerChanged() {
+  const provider = $("provider").value;
+  const defaults = PROVIDER_DEFAULTS[provider] || PROVIDER_DEFAULTS.custom;
+  if (!$("baseUrl").value.trim() || Object.values(PROVIDER_DEFAULTS).some(v => v.baseUrl === $("baseUrl").value.trim())) $("baseUrl").value = defaults.baseUrl;
+  if (!$("model").value.trim() || Object.values(PROVIDER_DEFAULTS).some(v => v.model === $("model").value.trim())) $("model").value = defaults.model;
+}
+
+function transportChanged() { $("livekitFields").style.display = $("transport").value === "livekit" ? "block" : "none"; }
 
 async function load() {
   const stored = await chrome.storage.local.get(DEFAULTS);
-
-  $("apiKey").value = stored.apiKey || "";
-  $("targetLang").value = stored.targetLang || "fa";
-  $("voiceMode").value = stored.voiceMode || "gemini";
-  $("voice").value = stored.voice || DEFAULT_VOICE;
-  $("model").value = (stored.model || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+  Object.keys(DEFAULTS).forEach(key => { if ($(key)) $(key).value = stored[key] ?? DEFAULTS[key]; });
+  providerChanged();
+  transportChanged();
 }
 
 function showStatus(message, isError) {
-  const el = $("status");
-  el.textContent = message;
-  el.className = isError ? "error" : "success";
-  clearTimeout(showStatus.timer);
-  showStatus.timer = setTimeout(() => {
-    el.textContent = "";
-    el.className = "";
-  }, 3000);
+  const el = $("status"); el.textContent = message; el.className = isError ? "error" : "success";
+  clearTimeout(showStatus.timer); showStatus.timer = setTimeout(() => { el.textContent = ""; el.className = ""; }, 3500);
 }
 
+$("provider").addEventListener("change", providerChanged);
+$("transport").addEventListener("change", transportChanged);
 $("save").addEventListener("click", async () => {
   const apiKey = $("apiKey").value.trim();
-
-  if (!apiKey) {
-    showStatus("API key is required.", true);
-    return;
-  }
+  const transport = $("transport").value;
+  if (!apiKey && transport !== "livekit") { showStatus("LLM API key is required for direct LLM mode.", true); return; }
+  if (transport === "livekit" && !$("livekitUrl").value.trim()) { showStatus("LiveKit server URL is required.", true); return; }
 
   await chrome.storage.local.set({
+    provider: $("provider").value,
+    baseUrl: $("baseUrl").value.trim(),
     apiKey,
     targetLang: $("targetLang").value,
     voiceMode: $("voiceMode").value,
     voice: $("voice").value,
-    model: $("model").value.trim() || DEFAULT_MODEL,
+    model: $("model").value.trim(),
+    transport,
+    livekitUrl: $("livekitUrl").value.trim(),
+    livekitToken: $("livekitToken").value.trim(),
   });
-
   showStatus("Saved. DubWave is ready.", false);
 });
 
