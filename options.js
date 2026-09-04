@@ -8,9 +8,6 @@ const DEFAULTS = {
   voiceMode: "gemini",
   voice: "Gacrux",
   model: "gemini-3.5-live-translate-preview",
-  transport: "llm",
-  livekitUrl: "",
-  livekitToken: "",
 };
 
 const PROVIDER_DEFAULTS = {
@@ -26,13 +23,10 @@ function providerChanged() {
   if (!$("model").value.trim() || Object.values(PROVIDER_DEFAULTS).some(v => v.model === $("model").value.trim())) $("model").value = defaults.model;
 }
 
-function transportChanged() { $("livekitFields").style.display = $("transport").value === "livekit" ? "block" : "none"; }
-
 async function load() {
   const stored = await chrome.storage.local.get(DEFAULTS);
   Object.keys(DEFAULTS).forEach(key => { if ($(key)) $(key).value = stored[key] ?? DEFAULTS[key]; });
   providerChanged();
-  transportChanged();
 }
 
 function showStatus(message, isError) {
@@ -41,12 +35,9 @@ function showStatus(message, isError) {
 }
 
 $("provider").addEventListener("change", providerChanged);
-$("transport").addEventListener("change", transportChanged);
 $("save").addEventListener("click", async () => {
   const apiKey = $("apiKey").value.trim();
-  const transport = $("transport").value;
-  if (!apiKey && transport !== "livekit") { showStatus("LLM API key is required for direct LLM mode.", true); return; }
-  if (transport === "livekit" && !$("livekitUrl").value.trim()) { showStatus("LiveKit server URL is required.", true); return; }
+  if (!apiKey) { showStatus("LLM API key is required.", true); return; }
 
   await chrome.storage.local.set({
     provider: $("provider").value,
@@ -56,9 +47,6 @@ $("save").addEventListener("click", async () => {
     voiceMode: $("voiceMode").value,
     voice: $("voice").value,
     model: $("model").value.trim(),
-    transport,
-    livekitUrl: $("livekitUrl").value.trim(),
-    livekitToken: $("livekitToken").value.trim(),
   });
   showStatus("Saved. DubWave is ready.", false);
 });
